@@ -15,23 +15,20 @@ onBuild (ctx, proj, out) => {
 		return
 	}
 
-	zlibDir := ""
+	src := ctx.SourceDir
+	a := autotools.new(src, src+"/_build", installDir)
 	for _, dep := range proj.Deps {
 		depDir, err := ctx.outputDir(dep)
 		if err != nil {
 			out.addErr err
 			return
 		}
-		zlibDir = depDir
+		a.use depDir
 	}
 
-	src := ctx.SourceDir
-	cflags := "-O3 -Wall -Wextra -Wno-unknown-pragmas -Wcast-qual -I" + filepath.Join(zlibDir, "include")
-	libs := "-L" + filepath.Join(zlibDir, "lib") + " -lm -lpthread -lz"
-
-	exec "make", "-C", src, "pigz", "CFLAGS="+cflags, "LIBS="+libs
-	if lastErr != nil {
-		out.addErr lastErr
+	err = a.build()
+	if err != nil {
+		out.addErr err
 		return
 	}
 
