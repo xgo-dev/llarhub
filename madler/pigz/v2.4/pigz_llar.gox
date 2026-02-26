@@ -1,0 +1,57 @@
+import "os"
+import "path/filepath"
+
+id "madler/pigz"
+fromVer "v2.4"
+
+onRequire (proj, deps) => {
+	deps.require "madler/zlib", "v1.2.11"
+}
+
+onBuild (ctx, proj, out) => {
+	installDir, err := ctx.outputDir()
+	if err != nil {
+		out.addErr err
+		return
+	}
+
+	zlibDir := ""
+	for _, dep := range proj.Deps {
+		depDir, err := ctx.outputDir(dep)
+		if err != nil {
+			out.addErr err
+			return
+		}
+		zlibDir = depDir
+	}
+
+	src := ctx.SourceDir
+	cflags := "-O3 -Wall -Wextra -Wno-unknown-pragmas -Wcast-qual -I" + filepath.Join(zlibDir, "include")
+	libs := "-L" + filepath.Join(zlibDir, "lib") + " -lm -lpthread -lz"
+
+	exec "make", "-C", src, "pigz", "CFLAGS="+cflags, "LIBS="+libs
+	if lastErr != nil {
+		out.addErr lastErr
+		return
+	}
+
+	// Install binaries manually (no make install target)
+	binDir := filepath.Join(installDir, "bin")
+	err = os.MkdirAll(binDir, 0755)
+	if err != nil {
+		out.addErr err
+		return
+	}
+
+	exec "cp", filepath.Join(src, "pigz"), filepath.Join(binDir, "pigz")
+	if lastErr != nil {
+		out.addErr lastErr
+		return
+	}
+
+	exec "ln", "-sf", "pigz", filepath.Join(binDir, "unpigz")
+	if lastErr != nil {
+		out.addErr lastErr
+		return
+	}
+}
