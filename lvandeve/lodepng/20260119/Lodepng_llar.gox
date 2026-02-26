@@ -1,0 +1,41 @@
+id "lvandeve/lodepng"
+
+fromVer "20260119"
+
+onBuild (ctx, proj, out) => {
+	installDir, err := ctx.outputDir()
+	if err != nil {
+		out.addErr err
+		return
+	}
+
+	srcDir := ctx.SourceDir
+	libDir := "${installDir}/lib"
+	incDir := "${installDir}/include"
+
+	exec "mkdir", "-p", libDir, incDir
+	if lastErr != nil {
+		out.addErr lastErr
+		return
+	}
+
+	exec "g++", "-O2", "-c", "${srcDir}/lodepng.cpp", "-o", "${srcDir}/lodepng.o"
+	if lastErr != nil {
+		out.addErr lastErr
+		return
+	}
+
+	exec "ar", "rcs", "${libDir}/liblodepng.a", "${srcDir}/lodepng.o"
+	if lastErr != nil {
+		out.addErr lastErr
+		return
+	}
+
+	exec "cp", "${srcDir}/lodepng.h", "${incDir}/lodepng.h"
+	if lastErr != nil {
+		out.addErr lastErr
+		return
+	}
+
+	out.setMetadata "-llodepng"
+}
