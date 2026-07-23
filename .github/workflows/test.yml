@@ -1,0 +1,116 @@
+name: Test formulas
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Find changed modules
+    runs-on: ubuntu-latest
+    outputs:
+      modules: ${{ steps.modules.outputs.modules }}
+      has_modules: ${{ steps.modules.outputs.has_modules }}
+
+    steps:
+      - name: Check out formulas
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Find changed modules
+        id: modules
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed_modules=()
+          while IFS= read -r -d '' path; do
+            IFS=/ read -r owner repo _ <<< "$path"
+            module="$owner/$repo"
+            if [[ -f "$module/versions.json" ]]; then
+              changed_modules+=("$module")
+            fi
+          done < <(git diff --name-only --diff-filter=ACMRT -z "$BASE_SHA" "$HEAD_SHA")
+
+          modules_json="$({ printf '%s\n' "${changed_modules[@]}" | sort -u; } | jq -Rsc 'split("\n") | map(select(length > 0))')"
+          echo "modules=$modules_json" >> "$GITHUB_OUTPUT"
+          if [[ "$modules_json" == "[]" ]]; then
+            echo "has_modules=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_modules=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Changed modules: $modules_json" >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    name: ${{ matrix.module }} (${{ matrix.goos }}-${{ matrix.goarch }})
+    needs: changes
+    if: needs.changes.outputs.has_modules == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      # TODO: Expand this matrix with every formula option combination after
+      # `llar test` can enumerate options instead of testing defaults only.
+      matrix:
+        module: ${{ fromJSON(needs.changes.outputs.modules) }}
+        platform:
+          - linux-amd64
+          - linux-arm64
+          - darwin-amd64
+          - darwin-arm64
+        include:
+          - platform: linux-amd64
+            runner: ubuntu-24.04
+            goos: linux
+            goarch: amd64
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            goos: linux
+            goarch: arm64
+          - platform: darwin-amd64
+            runner: macos-15-intel
+            goos: darwin
+            goarch: amd64
+          - platform: darwin-arm64
+            runner: macos-latest
+            goos: darwin
+            goarch: arm64
+
+    steps:
+      - name: Check out formulas
+        uses: actions/checkout@v7
+
+      - name: Check out llar
+        uses: actions/checkout@v7
+        with:
+          repository: goplus/llar
+          ref: main
+          path: .llar-source
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: .llar-source/go.mod
+          cache: false
+
+      - name: Verify runner platform
+        shell: bash
+        run: |
+          test "$(go env GOOS)" = "${{ matrix.goos }}"
+          test "$(go env GOARCH)" = "${{ matrix.goarch }}"
+
+      - name: Install llar
+        working-directory: .llar-source
+        run: |
+          go install -ldflags="-checklinkname=0" ./cmd/llar
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Test module
+        run: llar test --verbose "./${{ matrix.module }}" --os "${{ matrix.goos }}" --arch "${{ matrix.goarch }}"
