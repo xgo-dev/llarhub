@@ -2,12 +2,13 @@ name: Test formulas
 
 on:
   pull_request:
+  push:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,17 +29,25 @@ jobs:
         id: modules
         shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
         run: |
           changed_modules=()
+
+          changed_paths=(git diff --name-only --diff-filter=ACMRT -z "$BASE_SHA" "$HEAD_SHA")
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            # A first branch push has no previous commit. For example, GitHub
+            # supplies an all-zero `before` SHA when creating a new branch.
+            changed_paths=(git ls-tree -r -z --name-only "$HEAD_SHA")
+          fi
+
           while IFS= read -r -d '' path; do
             IFS=/ read -r owner repo _ <<< "$path"
             module="$owner/$repo"
             if [[ -f "$module/versions.json" ]]; then
               changed_modules+=("$module")
             fi
-          done < <(git diff --name-only --diff-filter=ACMRT -z "$BASE_SHA" "$HEAD_SHA")
+          done < <("${changed_paths[@]}")
 
           modules_json="$({ printf '%s\n' "${changed_modules[@]}" | sort -u; } | jq -Rsc 'split("\n") | map(select(length > 0))')"
           echo "modules=$modules_json" >> "$GITHUB_OUTPUT"
