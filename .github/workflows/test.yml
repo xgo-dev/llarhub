@@ -121,5 +121,7 @@ jobs:
           go install -ldflags="-checklinkname=0" ./cmd/llar
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
+      # TODO: Add version-range support to `llar test`.
+      # For example, test a changed formula from `fromVer "1.0.0"` instead of the latest source tag.
       - name: Test module
         run: llar test --verbose "./${{ matrix.module }}" --os "${{ matrix.goos }}" --arch "${{ matrix.goarch }}"
