@@ -1,0 +1,113 @@
+import "os"
+import "slices"
+
+id "json-c/json-c"
+
+// Serves the json-c 0.18 upstream tag family. The Conan recipe folder also
+// covers 0.14-0.17, but those revisions use a different CMake build contract
+// (no BUILD_STATIC_LIBS/DISABLE_STATIC_FPIC before 0.15, no BUILD_APPS and a
+// forced CMP0042/policy-min before 0.17). Only the 0.18 revision was verified,
+// so this is the honest fromVer boundary. Add a lower threshold with its own
+// formula when an earlier range is actually verified.
+fromVer "json-c-0.18-20240915"
+
+// Package-owned choices from the Conan recipe: shared/static selection and,
+// for the static library, whether position-independent code is emitted. The
+// upstream CMakeLists defaults both libraries ON; Conan builds exactly one,
+// defaulting to the static library.
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	shared := slices.contains(target.options["shared"], "ON")
+	// Conan removes fPIC when building the shared library; PIC is implicit
+	// for shared objects, so it only affects the static archive.
+	fpic := shared || slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.buildType "Release"
+
+	// Mirror the Conan CMakeToolchain variables for json-c >= 0.17.
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "BUILD_STATIC_LIBS", !shared
+	c.defineBool "DISABLE_STATIC_FPIC", !fpic
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_APPS", false
+
+	c.configure
+	c.build
+	c.install
+
+	// Derive metadata from the installed json-c.pc rather than guessing flags.
+	c.use installDir
+	capout => {
+		exec "pkg-config", "--libs", "json-c"
+	}
+	if lastErr != nil {
+		panic lastErr
+	}
+	ctx.setMetadata output.trimSpace
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Consumer mirrored from the Conan test_package: build a json object and
+	// serialize it, exercising the installed public headers and library.
+	testDir := ctx.SourceDir + "/_llartest"
+	os.mkdirAll(testDir, 0o755)!
+
+	src := `#include <json-c/json.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+	json_object *jobj = json_object_new_object();
+	json_object *jarray = json_object_new_array();
+	json_object_array_add(jarray, json_object_new_string("c"));
+	json_object_array_add(jarray, json_object_new_string("c++"));
+	json_object_object_add(jobj, "Categories", jarray);
+	printf("json object created: %s\n", json_object_to_json_string(jobj));
+	json_object_put(jobj);
+	return EXIT_SUCCESS;
+}
+`
+	os.writeFile(testDir+"/consumer.c", []byte(src), 0o644)!
+
+	// Point pkg-config at the installed result. This env change is all the
+	// test needs, so the consumer builds in its own tree and works identically
+	// on a cache hit, where onBuild (and its _build tree) never ran.
+	c := cmake.new(ctx.SourceDir, testDir, installDir)
+	c.use installDir
+
+	capout => {
+		exec "pkg-config", "--cflags", "json-c"
+	}
+	if lastErr != nil {
+		panic lastErr
+	}
+	cflags := output.trimSpace
+
+	capout => {
+		exec "pkg-config", "--libs", "json-c"
+	}
+	if lastErr != nil {
+		panic lastErr
+	}
+	libs := output.trimSpace
+
+	bin := testDir + "/consumer"
+	exec "sh", "-c", "cc "+cflags+" "+testDir+"/consumer.c -o "+bin+" "+libs
+	if lastErr != nil {
+		panic lastErr
+	}
+
+	exec bin
+	if lastErr != nil {
+		panic lastErr
+	}
+}
