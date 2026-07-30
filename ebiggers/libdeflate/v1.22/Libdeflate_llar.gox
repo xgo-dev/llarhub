@@ -1,0 +1,98 @@
+import (
+	"os"
+	"slices"
+)
+
+id "ebiggers/libdeflate"
+
+fromVer "v1.22"
+
+// libdeflate builds a static library by default. The Conan recipe exposes the
+// same static/shared choice through its `shared` option and toggles the two
+// upstream CMake switches accordingly. `shared` is the only Conan package
+// option that changes the installed library, so it is the only option kept.
+//
+// The Conan `fPIC` option is intentionally dropped: libdeflate has no PIC build
+// switch, always compiles its shared library with position-independent code,
+// and the static-library PIC choice changes neither the installed interface,
+// the consumer metadata, nor dependency resolution. Keeping it would only add
+// meaningless matrix combinations.
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	for _, value := range target.options["shared"] {
+		if value != "ON" && value != "OFF" {
+			return false
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	shared := slices.contains(target.options["shared"], "ON")
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	// Pin the install layout to lib/ so the pkg-config file and library land
+	// where the consumer metadata below and LLAR's `use` helper expect them;
+	// upstream honors CMAKE_INSTALL_LIBDIR through GNUInstallDirs.
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	// Build exactly one linkage, matching the selected `shared` option, and
+	// omit the gzip program and upstream test suite (the Conan package intent).
+	c.defineBool "LIBDEFLATE_BUILD_STATIC_LIB", !shared
+	c.defineBool "LIBDEFLATE_BUILD_SHARED_LIB", shared
+	c.defineBool "LIBDEFLATE_BUILD_GZIP", false
+	c.defineBool "LIBDEFLATE_BUILD_TESTS", false
+	c.configure
+	c.build
+	c.install
+
+	// Consumer metadata mirrors the installed libdeflate.pc, which upstream
+	// generates as `Cflags: -I${includedir}` and `Libs: -L${libdir} -ldeflate`
+	// with includedir=<prefix>/include and libdir=<prefix>/lib. Emitting the
+	// paths directly avoids pkg-config shell-quoting of the install prefix;
+	// LLAR's artifact encoder rewrites the prefix into a portable form.
+	ctx.setMetadata "-I" + installDir + "/include -L" + installDir + "/lib -ldeflate"
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testBuild := ctx.SourceDir + "/_consumer_build"
+
+	if err := os.mkdirAll(testBuild, 0o755); err != nil {
+		panic err
+	}
+
+	// Ship the consumer next to the Formula so the test does not depend on the
+	// onBuild scratch tree, which is skipped on a cache hit.
+	source := ctx.Proj.readFile("v1.22/consumer.c")!
+	consumer := testBuild + "/consumer.c"
+	binary := testBuild + "/consumer"
+	if err := os.writeFile(consumer, source, 0o644); err != nil {
+		panic err
+	}
+
+	// Compile and link against the installed output. libdeflate installs
+	// <libdeflate.h> under include/ and libdeflate.{a,so} under lib/ with the
+	// consumer name `deflate`, matching the installed libdeflate.pc. Passing
+	// these paths as explicit compiler arguments keeps the test correct even
+	// when the install directory contains characters a pkg-config shell quote
+	// would otherwise escape.
+	exec "cc", "-o", binary, consumer,
+		"-I"+installDir+"/include",
+		"-L"+installDir+"/lib",
+		"-ldeflate"
+	if lastErr != nil {
+		panic lastErr
+	}
+
+	// Run the consumer to confirm the installed library actually links and
+	// loads. A shared build needs its lib directory on the loader path.
+	exec {"LD_LIBRARY_PATH": installDir + "/lib", "DYLD_LIBRARY_PATH": installDir + "/lib"}, binary
+	if lastErr != nil {
+		panic lastErr
+	}
+}
