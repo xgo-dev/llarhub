@@ -1,0 +1,84 @@
+import "os"
+import "strings"
+
+id "JuliaStrings/utf8proc"
+
+fromVer "v2.9.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.buildType "Release"
+	// utf8proc v2.9.0 declares cmake_minimum_required(VERSION 3.0.0); the Conan
+	// recipe injects the same policy floor for pre-2.10.0 releases so the
+	// project keeps configuring under CMake 4.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_POLICY_DEFAULT_CMP0042", "NEW"
+	// Build the static archive that is both the upstream and Conan default.
+	// utf8proc adds the UTF8PROC_STATIC compile definition itself in this mode.
+	c.defineBool "BUILD_SHARED_LIBS", false
+	// Match Conan's default fPIC=True so the static archive can still be linked
+	// into shared consumers.
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+	// utf8proc's own test/fuzz targets download Unicode data; keep them off
+	// (already the upstream default) so the build stays hermetic.
+	c.defineBool "UTF8PROC_ENABLE_TESTING", false
+
+	c.configure
+	c.build
+	c.install
+
+	// Derive the consumer interface from the pkg-config file utf8proc installs
+	// (libutf8proc.pc) rather than guessing flags.
+	c.use installDir
+	capout => {
+		exec "pkg-config", "--libs", "--cflags", "libutf8proc"
+	}
+	meta := strings.trimSpace(output)
+	// A consumer of the static build must define UTF8PROC_STATIC so the header
+	// does not mark symbols dllimport on Windows; harmless elsewhere. Mirrors
+	// the Conan package_info static branch.
+	meta = strings.trimSpace(meta + " -DUTF8PROC_STATIC")
+	ctx.setMetadata meta
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Build the consumer in a tree independent of the onBuild scratch dir so
+	// onTest behaves identically on a cache hit (where _build does not exist).
+	testDir := ctx.SourceDir + "/_llartest"
+	os.removeAll(testDir)
+	os.mkdirAll(testDir, 0o755)!
+
+	// Consumer modelled on the Conan test_package: print the library and
+	// Unicode versions through the installed public headers/library.
+	src := testDir + "/consumer.c"
+	os.writeFile(src, []byte(`#include <stdio.h>
+#include "utf8proc.h"
+
+int main(void) {
+	printf("utf8proc version: %s\n", utf8proc_version());
+	printf("Unicode version: %s\n", utf8proc_unicode_version());
+	return 0;
+}
+`), 0o644)!
+
+	bin := testDir + "/consumer"
+	// Compile and link against the installed artifact using its own pkg-config
+	// entry so include/lib paths and flags come from the real installation.
+	// Paths are single-quoted because a matrix suffix can contain a "|".
+	build := "cc '" + src + "' -o '" + bin + "'" +
+		" -I'" + installDir + "/include' -DUTF8PROC_STATIC" +
+		" $(PKG_CONFIG_PATH='" + installDir + "/lib/pkgconfig' pkg-config --cflags --libs libutf8proc)"
+	exec "sh", "-c", build
+	if lastErr != nil {
+		panic lastErr
+	}
+
+	exec "sh", "-c", "'" + bin + "'"
+	if lastErr != nil {
+		panic lastErr
+	}
+}
