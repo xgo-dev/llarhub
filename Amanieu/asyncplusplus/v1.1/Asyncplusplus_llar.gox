@@ -1,0 +1,79 @@
+import "os"
+
+id "Amanieu/asyncplusplus"
+
+// Conan Center serves versions 1.1 and 1.2 from the same "all" recipe folder.
+// Both upstream tags (v1.1, v1.2) share an identical CMake build and install
+// contract, so a single formula covers the range from v1.1 upward.
+fromVer "v1.1"
+
+// Async++ is a self-contained C++11 concurrency framework. Upstream only needs
+// the system threads library (find_package(Threads)); it declares no external
+// packages, matching the Conan recipe which has no requirements. Hence there is
+// no onRequire. It also builds for any os/arch with a C++11 toolchain, and
+// pthread is a system library resolved by the toolchain rather than an LLAR
+// dependency, so no matrix constraints are needed.
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.buildType "Release"
+	// Upstream declares cmake_minimum_required(VERSION 3.1); modern CMake needs
+	// this shim to accept the old policy baseline.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	// Build the static library, matching the Conan default (shared=False). With
+	// BUILD_SHARED_LIBS=OFF, upstream defines LIBASYNC_STATIC on the target.
+	c.defineBool "BUILD_SHARED_LIBS", false
+
+	c.configure
+	c.build
+	c.install
+
+	// No pkg-config file is installed upstream, so derive the consumer flags
+	// from the installed interface: define LIBASYNC_STATIC for the static
+	// library (as both upstream CMake and the Conan package_info do), link
+	// libasync++, and link pthread (Async++ links Threads::Threads PUBLIC).
+	ctx.setMetadata "-DLIBASYNC_STATIC -lasync++ -lpthread"
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Keep the test build tree independent of the onBuild scratch tree so the
+	// test also works on a cache hit, when onBuild (and its _build dir) does
+	// not run. ctx.SourceDir is a fresh checkout that always exists.
+	testDir := ctx.SourceDir + "/_test"
+	os.mkdirAll(testDir, 0o755)!
+
+	// Consumer derived from the Conan test_package: include <async++.h> and
+	// exercise the public spawn/then/when_all/parallel_reduce API, then run it.
+	consumerSource := `#include <async++.h>
+#include <iostream>
+
+int main() {
+	auto t1 = async::spawn([] { std::cout << "task1\n"; });
+	auto t2 = async::spawn([]() -> int { return 42; });
+	auto t3 = t2.then([](int v) -> int { return v * 3; });
+	auto t4 = async::when_all(t1, t3);
+	t4.get();
+
+	int r = async::parallel_reduce({1, 2, 3, 4}, 0, [](int x, int y) {
+		return x + y;
+	});
+	if (r != 10) {
+		std::cerr << "unexpected reduce result: " << r << "\n";
+		return 1;
+	}
+	std::cout << "async++ ok: " << r << "\n";
+	return 0;
+}
+`
+	src := testDir + "/consumer.cpp"
+	os.writeFile(src, []byte(consumerSource), 0o644)!
+
+	bin := testDir + "/consumer"
+	exec "g++", "-std=c++11", "-DLIBASYNC_STATIC", "-I", installDir+"/include", "-o", bin, src, "-L", installDir+"/lib", "-lasync++", "-lpthread"
+
+	exec bin
+}
