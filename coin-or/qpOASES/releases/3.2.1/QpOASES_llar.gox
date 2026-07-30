@@ -1,0 +1,110 @@
+import "os"
+import "slices"
+
+id "coin-or/qpOASES"
+
+fromVer "releases/3.2.1"
+
+// qpOASES exposes a single, package-owned build choice worth translating:
+// the Conan recipe's `fPIC` option (default True, dropped on Windows).
+// It maps to CMAKE_POSITION_INDEPENDENT_CODE for the static library.
+defaults {
+	"fPIC": "ON",
+}
+
+// Position-independent code is meaningless on Windows, which is exactly why
+// the Conan recipe deletes the fPIC option there. Reject fPIC=ON on Windows.
+filter => {
+	if slices.contains(target.require["os"], "windows") {
+		return slices.contains(target.options["fPIC"], "OFF")
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.buildType "Release"
+	// Upstream declares cmake_minimum_required(VERSION 2.6); modern CMake
+	// refuses that compatibility floor without an explicit policy version.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+
+	// Match the Conan recipe: build only the library, not the examples.
+	c.defineBool "QPOASES_BUILD_EXAMPLES", false
+
+	// Carry over the fPIC option for the static library.
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", slices.contains(target.options["fPIC"], "ON")
+
+	c.configure
+	c.build
+	c.install
+
+	// Installed interface: static lib libqpOASES.a in lib/, headers in
+	// include/ (qpOASES.hpp + the qpOASES/ directory).
+	ctx.setMetadata "-lqpOASES"
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Consumer check derived from the Conan test_package: include the public
+	// header and construct/solve a QProblem against the installed library.
+	// Built in an independent tree so onTest also passes on a cache hit,
+	// where onBuild (and its _build dir) never ran.
+	testDir := ctx.SourceDir + "/_qpoases_test"
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := `#include <qpOASES.hpp>
+
+int main()
+{
+	USING_NAMESPACE_QPOASES
+
+	// 2 variables, 1 constraint (mirrors the Conan test_package problem).
+	real_t H[2*2] = { 1.0, 0.0, 0.0, 0.5 };
+	real_t A[1*2] = { 1.0, 1.0 };
+	real_t g[2]   = { 1.5, 1.0 };
+	real_t lb[2]  = { 0.5, -2.0 };
+	real_t ub[2]  = { 5.0, 2.0 };
+	real_t lbA[1] = { -1.0 };
+	real_t ubA[1] = { 2.0 };
+
+	QProblem example( 2, 1 );
+
+	Options options;
+	example.setOptions( options );
+
+	int_t nWSR = 10;
+	returnValue rv = example.init( H, g, A, lb, ub, lbA, ubA, nWSR );
+
+	return ( rv == SUCCESSFUL_RETURN ) ? 0 : 1;
+}
+`
+	os.writeFile(testDir+"/consumer.cpp", []byte(consumer), 0o644)!
+
+	cml := `cmake_minimum_required(VERSION 3.5)
+project(qpoases_consumer CXX)
+add_executable(consumer consumer.cpp)
+find_path(QPOASES_INCLUDE_DIR NAMES qpOASES.hpp REQUIRED)
+find_library(QPOASES_LIB NAMES qpOASES REQUIRED)
+target_include_directories(consumer PRIVATE ${QPOASES_INCLUDE_DIR})
+target_link_libraries(consumer PRIVATE ${QPOASES_LIB})
+`
+	os.writeFile(testDir+"/CMakeLists.txt", []byte(cml), 0o644)!
+
+	testBuild := testDir + "/_build"
+	tc := cmake.new(testDir, testBuild, "")
+	tc.buildType "Release"
+	tc.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	tc.use installDir
+
+	tc.configure
+	tc.build
+
+	// Run the freshly built consumer. A non-zero exit surfaces via lastErr.
+	exec testBuild + "/consumer"
+	if lastErr != nil {
+		panic lastErr
+	}
+}
