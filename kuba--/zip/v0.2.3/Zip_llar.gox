@@ -1,0 +1,92 @@
+import (
+	"os"
+	"strings"
+)
+
+id "kuba--/zip"
+
+fromVer "v0.2.3"
+
+// kuba--/zip is a single C library with no external dependencies (miniz is
+// vendored in src/). It builds a static libzip by default and installs the
+// public header at include/zip/zip.h — the interface the Conan recipe and the
+// upstream CMake install both expose. This formula builds that default
+// (static) library, matching the upstream and Conan Center defaults.
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	// Upstream CMakeLists.txt compiles with "-Wall -Wextra -Werror -pedantic"
+	// under the C90 standard. -Werror turns benign warnings (e.g. miniz's own
+	// diagnostics) into hard build failures across compiler versions, so strip
+	// it exactly as the Conan recipe does before configuring.
+	cmakeLists := ctx.SourceDir + "/CMakeLists.txt"
+	data := os.readFile(cmakeLists)!
+	patched := strings.replaceAll(string(data), "-Werror", "")
+	os.writeFile(cmakeLists, []byte(patched), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.buildType "Release"
+	// Build the library only; the upstream test tree is unnecessary for the
+	// installed interface and is otherwise compiled on a standalone build.
+	c.defineBool "CMAKE_DISABLE_TESTING", true
+	c.defineBool "ZIP_BUILD_DOCS", false
+	// PIC-enabled static archive, matching the upstream ZIP_STATIC_PIC default
+	// and the Conan recipe's default fPIC=True.
+	c.defineBool "ZIP_STATIC_PIC", true
+
+	c.configure
+	c.build
+	c.install
+
+	// Installed public interface: include/zip/zip.h + lib/libzip.a.
+	ctx.setMetadata "-lzip"
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Compile a small consumer against the installed result, mirroring the
+	// Conan test_package: open an archive, write an in-memory entry, close it.
+	// The build tree is independent of onBuild's _build so onTest also works
+	// on a cache hit where onBuild was skipped and no _build directory exists.
+	testDir := ctx.SourceDir + "/_test"
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := `#include <zip/zip.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+	struct zip_t *zip = zip_open("consumer.zip", ZIP_DEFAULT_COMPRESSION_LEVEL, 'w');
+	if (zip == NULL) {
+		return EXIT_FAILURE;
+	}
+	zip_entry_open(zip, "foo.txt");
+	const char *buf = "Some data here...";
+	zip_entry_write(zip, buf, strlen(buf));
+	zip_entry_close(zip);
+	zip_close(zip);
+	return EXIT_SUCCESS;
+}
+`
+	src := testDir + "/consumer.c"
+	os.writeFile(src, []byte(consumer), 0o644)!
+
+	bin := testDir + "/consumer"
+	cc := os.getenv("CC")
+	if cc == "" {
+		cc = "cc"
+	}
+
+	exec cc, src, "-I", installDir+"/include", "-L", installDir+"/lib", "-lzip", "-o", bin
+	if lastErr != nil {
+		panic lastErr
+	}
+
+	// Run the consumer from testDir so the archive it writes stays out of the
+	// source and install trees. A non-zero exit surfaces via lastErr.
+	exec "sh", "-c", "cd "+testDir+" && "+bin
+	if lastErr != nil {
+		panic lastErr
+	}
+}
