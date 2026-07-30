@@ -1,0 +1,69 @@
+import "os"
+import "path/filepath"
+
+id "sago007/PlatformFolders"
+
+# Serves the Conan `platformfolders/all` recipe range. Tags 4.2.0 and 4.3.0
+# share an identical CMake build contract: target `platform_folders`, the same
+# PLATFORMFOLDERS_* options, header `sago/platform_folders.h`, and C++11.
+fromVer "4.2.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.buildType "Release"
+	# Build the library only and install its public result; skip the test tree.
+	c.defineBool "PLATFORMFOLDERS_BUILD_TESTING", false
+	c.defineBool "PLATFORMFOLDERS_ENABLE_INSTALL", true
+	# Static library, matching the Conan recipe's default (shared=False).
+	c.defineBool "PLATFORMFOLDERS_BUILD_SHARED_LIBS", false
+
+	c.configure
+	c.build
+	c.install
+
+	# Installed interface: libplatform_folders in <prefix>/lib, header in
+	# <prefix>/include/sago. Upstream links the math library on Unix.
+	ctx.setMetadata "-lplatform_folders -lm"
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	# Keep the test build tree independent of the onBuild scratch tree so the
+	# test also runs on a cache hit (when _build no longer exists).
+	testDir := ctx.SourceDir + "/_test"
+	os.mkdirAll testDir, 0755
+
+	src := filepath.join(testDir, "consumer.cpp")
+	program := `#include <iostream>
+#include <string>
+#include <sago/platform_folders.h>
+
+int main() {
+	std::cout << "Config: " << sago::getConfigHome() << "\n";
+	std::cout << "Data: " << sago::getDataHome() << "\n";
+	std::cout << "State: " << sago::getStateDir() << "\n";
+	std::cout << "Cache: " << sago::getCacheDir() << "\n";
+	std::cout << "Documents: " << sago::getDocumentsFolder() << "\n";
+	std::cout << "Desktop: " << sago::getDesktopFolder() << "\n";
+	std::cout << "Pictures: " << sago::getPicturesFolder() << "\n";
+	std::cout << "Music: " << sago::getMusicFolder() << "\n";
+	std::cout << "Video: " << sago::getVideoFolder() << "\n";
+	std::cout << "Download: " << sago::getDownloadFolder() << "\n";
+	std::cout << "Save games 1: " << sago::getSaveGamesFolder1() << "\n";
+	std::cout << "Save games 2: " << sago::getSaveGamesFolder2() << "\n";
+	return 0;
+}
+`
+	os.writeFile src, []byte(program), 0644
+
+	bin := filepath.join(testDir, "consumer")
+	incDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
+
+	# Compile the consumer against the installed header/library, then run it.
+	exec "c++", "-std=c++11", src, "-I", incDir, "-L", libDir, "-o", bin, "-lplatform_folders", "-lm"
+	exec bin
+}
