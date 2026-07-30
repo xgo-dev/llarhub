@@ -25,38 +25,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: 1.24.0
+          cache: false
+
       - name: Find changed modules
         id: modules
-        shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          changed_modules=()
-
-          changed_paths=(git diff --name-only --diff-filter=ACMRT -z "$BASE_SHA" "$HEAD_SHA")
-          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
-            # A first branch push has no previous commit. For example, GitHub
-            # supplies an all-zero `before` SHA when creating a new branch.
-            changed_paths=(git ls-tree -r -z --name-only "$HEAD_SHA")
-          fi
-
-          while IFS= read -r -d '' path; do
-            IFS=/ read -r owner repo _ <<< "$path"
-            module="$owner/$repo"
-            if [[ -f "$module/versions.json" ]]; then
-              changed_modules+=("$module")
-            fi
-          done < <("${changed_paths[@]}")
-
-          modules_json="$({ printf '%s\n' "${changed_modules[@]}" | sort -u; } | jq -Rsc 'split("\n") | map(select(length > 0))')"
-          echo "modules=$modules_json" >> "$GITHUB_OUTPUT"
-          if [[ "$modules_json" == "[]" ]]; then
-            echo "has_modules=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_modules=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "Changed modules: $modules_json" >> "$GITHUB_STEP_SUMMARY"
+          go install -tags=linknamefix -ldflags="-checklinkname=0" github.com/goplus/ixgo/cmd/ixgo@v1.1.1
+          "$(go env GOPATH)/bin/ixgo" run .github/scripts/find_changed_modules.gsh
 
   test:
     name: ${{ matrix.module }} (${{ matrix.goos }}-${{ matrix.goarch }})
