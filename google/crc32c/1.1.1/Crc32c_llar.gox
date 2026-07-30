@@ -1,0 +1,84 @@
+import "os"
+
+id "google/crc32c"
+
+fromVer "1.1.1"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.buildType "Release"
+	// crc32c declares cmake_minimum_required(VERSION 3.1); allow CMake 4.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	// Build only the library and its public header; skip the tooling that
+	// pulls in vendored glog/googletest/benchmark subprojects.
+	c.defineBool "CRC32C_BUILD_TESTS", false
+	c.defineBool "CRC32C_BUILD_BENCHMARKS", false
+	c.defineBool "CRC32C_USE_GLOG", false
+	c.defineBool "CRC32C_INSTALL", true
+
+	c.configure
+	c.build
+	c.install
+
+	// crc32c installs a single library named crc32c and no pkg-config file.
+	ctx.setMetadata "-lcrc32c"
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Keep the consumer's build tree separate from onBuild's _build so the
+	// test also runs on a cache hit, where onBuild is skipped and _build
+	// never exists. Everything lives under a fresh scratch directory.
+	testDir := ctx.SourceDir + "/_consumer"
+	testBuild := testDir + "/_build"
+	os.mkdirAll(testDir, 0o755)!
+
+	// Minimal consumer mirroring the Conan test_package: include the public
+	// header and exercise both the raw-buffer and std::string overloads.
+	consumer := `#include <cstdint>
+#include <string>
+#include "crc32c/crc32c.h"
+
+int main() {
+  const uint8_t buffer[4] = {0, 0, 0, 0};
+  std::uint32_t a = crc32c::Crc32c(buffer, sizeof(buffer));
+
+  std::string s;
+  s.resize(4);
+  std::uint32_t b = crc32c::Crc32c(s);
+
+  return (a == b) ? 0 : 1;
+}
+`
+	os.writeFile(testDir+"/consumer.cpp", []byte(consumer), 0o644)!
+
+	cmakeLists := `cmake_minimum_required(VERSION 3.5)
+project(crc32c_consumer CXX)
+set(CMAKE_CXX_STANDARD 11)
+# Consume via the exported CMake package (installed under lib/cmake/Crc32c);
+# cmake.use puts the install root on CMAKE_PREFIX_PATH. The Crc32c::crc32c
+# target carries its own include directories and library.
+find_package(Crc32c CONFIG REQUIRED)
+add_executable(crc32c_consumer consumer.cpp)
+target_link_libraries(crc32c_consumer PRIVATE Crc32c::crc32c)
+`
+	os.writeFile(testDir+"/CMakeLists.txt", []byte(cmakeLists), 0o644)!
+
+	tc := cmake.new(testDir, testBuild, "")
+	tc.buildType "Release"
+	tc.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	// Put the install root on CMAKE_PREFIX_PATH so find_package locates it.
+	tc.use installDir
+
+	tc.configure
+	tc.build
+
+	// Run the consumer; a non-zero exit surfaces through lastErr.
+	exec testBuild + "/crc32c_consumer"
+	if lastErr != nil {
+		panic lastErr
+	}
+}
