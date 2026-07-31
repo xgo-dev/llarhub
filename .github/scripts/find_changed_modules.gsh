@@ -37,21 +37,6 @@ func hasFormula(module string) (bool, error) {
 	return found, err
 }
 
-func isModule(module string) (bool, error) {
-	_, err := os.stat(filepath.join(module, "versions.json"))
-	if err == nil {
-		return true, nil
-	}
-	if !os.isNotExist(err) {
-		return false, err
-	}
-	has := hasFormula(module)?
-	if has {
-		return false, fmt.errorf("module %s is missing versions.json", module)
-	}
-	return false, nil
-}
-
 baseSHA := $BASE_SHA
 defaultBranch := $DEFAULT_BRANCH
 eventName := $EVENT_NAME
@@ -84,8 +69,15 @@ for changedPath in output.split("\x00") {
 		continue
 	}
 	module := parts[0] + "/" + parts[1]
-	ok := isModule(module)!
-	if !ok {
+	_, err := os.stat(filepath.join(module, "versions.json"))
+	if err != nil {
+		if !os.isNotExist(err) {
+			panic err
+		}
+		has := hasFormula(module)!
+		if has {
+			panic fmt.Sprintf("module %s is missing versions.json", module)
+		}
 		continue
 	}
 	modules[module] = true
