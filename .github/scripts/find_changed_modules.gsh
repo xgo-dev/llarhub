@@ -1,6 +1,7 @@
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,21 @@ func formulaDir(module, changedPath string) string {
 		dir = filepath.dir(dir)
 	}
 	return ""
+}
+
+func hasFormula(module string) (bool, error) {
+	found := false
+	err := filepath.walkDir(module, func(_ string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !entry.isDir() && strings.hasSuffix(entry.name(), "_llar.gox") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found, err
 }
 
 baseSHA := $BASE_SHA
@@ -39,7 +55,7 @@ if eventName == "pull_request" {
 }
 
 capout => {
-	git "diff", "--name-only", "--diff-filter=ACMRT", "-z", diffBase, headSHA
+	git "diff", "--name-only", "--diff-filter=ACDMRT", "-z", diffBase, headSHA
 }
 lastErr!
 
@@ -51,8 +67,19 @@ for changedPath in output.split("\x00") {
 		continue
 	}
 	module := parts[0] + "/" + parts[1]
-	_, err := os.stat(filepath.join(module, "versions.json"))
+	versionsPath := filepath.join(module, "versions.json")
+	_, err := os.stat(versionsPath)
 	if os.isNotExist(err) {
+		has, walkErr := hasFormula(module)
+		if os.isNotExist(walkErr) {
+			continue
+		}
+		if walkErr != nil {
+			panic walkErr
+		}
+		if has {
+			panic fmt.Sprintf("module %s is missing versions.json", module)
+		}
 		continue
 	}
 	if err != nil {
