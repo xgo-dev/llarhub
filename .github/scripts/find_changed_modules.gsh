@@ -5,12 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 )
 
 func formulaDir(module, changedPath string) string {
 	dir := filepath.dir(changedPath)
-	for strings.hasPrefix(dir, module+"/") {
+	for dir.hasPrefix(module + "/") {
 		matches := filepath.glob(filepath.join(dir, "*_llar.gox"))!
 		if matches.len > 0 {
 			return dir
@@ -22,17 +21,35 @@ func formulaDir(module, changedPath string) string {
 
 func hasFormula(module string) (bool, error) {
 	found := false
-	err := filepath.walkDir(module, func(_ string, entry fs.DirEntry, err error) error {
+	err := filepath.walkDir(module, (_, entry, err) => {
 		if err != nil {
 			return err
 		}
-		if !entry.isDir() && strings.hasSuffix(entry.name(), "_llar.gox") {
+		if !entry.isDir && entry.name.hasSuffix("_llar.gox") {
 			found = true
 			return fs.SkipAll
 		}
 		return nil
 	})
+	if os.isNotExist(err) {
+		return false, nil
+	}
 	return found, err
+}
+
+func isModule(module string) (bool, error) {
+	_, err := os.stat(filepath.join(module, "versions.json"))
+	if err == nil {
+		return true, nil
+	}
+	if !os.isNotExist(err) {
+		return false, err
+	}
+	has := hasFormula(module)?
+	if has {
+		return false, fmt.errorf("module %s is missing versions.json", module)
+	}
+	return false, nil
 }
 
 baseSHA := $BASE_SHA
@@ -45,13 +62,13 @@ var diffBase string
 if eventName == "pull_request" {
 	capout => { git "merge-base", baseSHA, headSHA }
 	lastErr!
-	diffBase = strings.trimSpace(output)
+	diffBase = output.trimSpace
 } else if refName == defaultBranch {
 	diffBase = baseSHA
 } else {
 	capout => { git "merge-base", "origin/"+defaultBranch, headSHA }
 	lastErr!
-	diffBase = strings.trimSpace(output)
+	diffBase = output.trimSpace
 }
 
 capout => {
@@ -62,28 +79,14 @@ lastErr!
 var modules map[string]bool = {}
 var formulaDirs map[string]map[string]bool = {}
 for changedPath in output.split("\x00") {
-	parts := strings.splitN(changedPath, "/", 3)
+	parts := changedPath.splitN("/", 3)
 	if parts.len < 3 {
 		continue
 	}
 	module := parts[0] + "/" + parts[1]
-	versionsPath := filepath.join(module, "versions.json")
-	_, err := os.stat(versionsPath)
-	if os.isNotExist(err) {
-		has, walkErr := hasFormula(module)
-		if os.isNotExist(walkErr) {
-			continue
-		}
-		if walkErr != nil {
-			panic walkErr
-		}
-		if has {
-			panic fmt.Sprintf("module %s is missing versions.json", module)
-		}
+	ok := isModule(module)!
+	if !ok {
 		continue
-	}
-	if err != nil {
-		panic err
 	}
 	modules[module] = true
 
@@ -98,7 +101,7 @@ for changedPath in output.split("\x00") {
 	}
 }
 
-var changedModules []string = []
+changedModules := []string([])
 changedModules <- [module for module, _ in modules]...
 sort.strings changedModules
 
@@ -107,7 +110,7 @@ for module in changedModules {
 	if len(dirs) > 1 {
 		changedDirs := [dir for dir, _ in dirs]
 		sort.strings changedDirs
-		panic fmt.Sprintf("module %s changes multiple Formula directories: %s; llar test cannot validate multiple fromVer ranges yet", module, strings.join(changedDirs, ", "))
+		panic fmt.Sprintf("module %s changes multiple Formula directories: %s; llar test cannot validate multiple fromVer ranges yet", module, changedDirs.join(", "))
 	}
 }
 
