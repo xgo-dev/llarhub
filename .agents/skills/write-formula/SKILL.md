@@ -1,8 +1,6 @@
 ---
 name: write-formula
 description: Create, migrate, review, debug, and validate LLAR formulas and module entries, including versions.json, _llar.gox build classfiles, _cmp.gox comparators, dependency discovery, build matrices, CMake and Autotools recipes, gsh commands, metadata, and onTest consumer checks. Use when adding a library to an LLAR formula store, changing an existing formula, porting legacy Formula hooks, or fixing formula selection, parsing, dependency, build, matrix, cache, command, metadata, or test failures.
-argument-hint: "[owner/repo] [version]"
-allowed-tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch
 ---
 
 # Write LLAR Formulas
