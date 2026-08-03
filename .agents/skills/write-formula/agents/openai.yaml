@@ -1,0 +1,4 @@
+interface:
+  display_name: "Write LLAR Formula"
+  short_description: "Create and validate current LLAR build formulas"
+  default_prompt: "Use $write-formula to create or update and validate an LLAR formula for the requested library."
