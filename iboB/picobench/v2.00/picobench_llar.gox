@@ -9,6 +9,10 @@ fromVer "v2.00"
 
 onBuild ctx => {
 	installDir := ctx.outputDir
+	// LLAR's shallow tag checkout records the selected annotated tag only in
+	// FETCH_HEAD, without creating refs/tags for git describe.
+	fetchHead := string(os.readFile(filepath.join(ctx.SourceDir, ".git", "FETCH_HEAD"))!)
+	version := fetchHead.splitN("'", 3)[1][1:]
 
 	// Upstream has no install rules. Carry the Conan recipe's header installer
 	// with context shared by every supported upstream tag.
@@ -34,7 +38,21 @@ onBuild ctx => {
 	license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!
 	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), license, 0o644)!
 
-	ctx.setMetadata "-I" + filepath.join(installDir, "include")
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+
+Name: picobench
+Description: A micro microbenchmarking library in a single header file
+Version: ` + version + `
+Libs:
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "picobench.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("picobench")!
 }
 
 onTest ctx => {
@@ -46,8 +64,13 @@ onTest ctx => {
 	consumer := filepath.join(testDir, "consumer.cpp")
 	os.writeFile(consumer, source, 0o644)!
 
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("picobench")!
+	flagsFile := filepath.join(testDir, "picobench.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
 	binary := filepath.join(testDir, "consumer")
-	exec "c++", "-std=c++11", "-I"+filepath.join(installDir, "include"), consumer, "-o", binary
+	exec "c++", "-std=c++11", "@"+flagsFile, consumer, "-o", binary
 	lastErr!
 	exec binary
 	lastErr!
