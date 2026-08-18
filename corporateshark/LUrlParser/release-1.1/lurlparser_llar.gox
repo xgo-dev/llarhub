@@ -1,0 +1,121 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+id "corporateshark/LUrlParser"
+
+fromVer "release-1.1"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	projectDir := filepath.join(ctx.SourceDir, "_llar_project")
+	os.mkdirAll(projectDir, 0755)!
+
+	// The release-1.1 source CMakeLists only builds its example. Conan's
+	// exported recipe CMakeLists is the verified library/install entrypoint.
+	cmakeLists := `cmake_minimum_required(VERSION 3.8)
+project(LUrlParser LANGUAGES CXX)
+
+add_library(lurlparser ${LURLPARSER_SRC_DIR}/LUrlParser.cpp)
+target_include_directories(lurlparser PRIVATE ${LURLPARSER_SRC_DIR})
+target_compile_features(lurlparser PRIVATE cxx_std_11)
+set_target_properties(lurlparser PROPERTIES
+    PUBLIC_HEADER ${LURLPARSER_SRC_DIR}/LUrlParser.h
+    CMAKE_CXX_STANDARD_REQUIRED ON
+    CMAKE_CXX_EXTENSIONS OFF
+    WINDOWS_EXPORT_ALL_SYMBOLS ON
+)
+
+include(GNUInstallDirs)
+install(
+    TARGETS lurlparser
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+`
+	os.writeFile(filepath.join(projectDir, "CMakeLists.txt"), []byte(cmakeLists), 0644)!
+
+	c := cmake.new(projectDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "LURLPARSER_SRC_DIR", ctx.SourceDir
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+	c.configure
+	c.build
+	c.install
+
+	license := ctx.Proj.readFile("License.txt")!
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0755)!
+	os.writeFile(filepath.join(licenseDir, "License.txt"), license, 0644)!
+
+	flags := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-llurlparser",
+	}
+	if slices.contains(target.require["os"], "linux") ||
+		slices.contains(target.require["os"], "freebsd") {
+		flags <- "-lm"
+	}
+	ctx.setMetadata strings.join(flags, " ")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0755)!
+
+	source := `#include <iostream>
+
+#include "LUrlParser.h"
+
+int main() {
+    const auto URL = LUrlParser::ParseURL::parseURL("https://John:Dow@github.com:80/corporateshark/LUrlParser");
+
+    if (!URL.isValid()) {
+        return 1;
+    }
+
+    std::cout << "Scheme    : " << URL.scheme_ << std::endl;
+    std::cout << "Host      : " << URL.host_ << std::endl;
+    std::cout << "Port      : " << URL.port_ << std::endl;
+    std::cout << "Path      : " << URL.path_ << std::endl;
+    std::cout << "Query     : " << URL.query_ << std::endl;
+    std::cout << "Fragment  : " << URL.fragment_ << std::endl;
+    std::cout << "User name : " << URL.userName_ << std::endl;
+    std::cout << "Password  : " << URL.password_ << std::endl;
+    return 0;
+}
+	`
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(source), 0644)!
+
+	binary := filepath.join(testDir, "consumer")
+	args := []string{
+		sourcePath,
+		"-std=c++11",
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-llurlparser",
+	}
+	if slices.contains(target.require["os"], "linux") ||
+		slices.contains(target.require["os"], "freebsd") {
+		args <- "-lm"
+	}
+	args <- "-o", binary
+
+	exec "c++", args...
+	if lastErr != nil {
+		panic lastErr
+	}
+	exec binary
+	if lastErr != nil {
+		panic lastErr
+	}
+}
