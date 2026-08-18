@@ -1,0 +1,109 @@
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+)
+
+const consumerSource = `#include <stdio.h>
+#include <stdlib.h>
+
+#include "schrift.h"
+
+int main(void)  {
+    printf("Schrift version: %s\n", sft_version());
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "tomolt/libschrift"
+
+fromVer "v0.10.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	cmakeLists := ctx.Proj.readFile("CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "LIBSCHRIFT_SRC_DIR", ctx.SourceDir
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0644)!
+
+	osName := runtime.GOOS
+	osValues := target.require["os"]
+	if osValues.len > 0 {
+		osName = osValues[0]
+	}
+	metadata := "-I" + filepath.join(installDir, "include") + " -L" + filepath.join(installDir, "lib") + " -lschrift"
+	if osName == "linux" || osName == "freebsd" {
+		metadata += " -lm"
+	}
+	ctx.setMetadata metadata
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0644)!
+
+	osName := runtime.GOOS
+	osValues := target.require["os"]
+	if osValues.len > 0 {
+		osName = osValues[0]
+	}
+	args := []string{
+		"-I" + filepath.join(installDir, "include"),
+		consumer,
+		"-L" + filepath.join(installDir, "lib"),
+		"-lschrift",
+	}
+	if osName == "linux" || osName == "freebsd" {
+		args = append(args, "-lm")
+	}
+	binary := filepath.join(testDir, "consumer")
+	args = append(args, "-o", binary)
+	exec "cc", args...
+	lastErr!
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec binary
+	lastErr!
+}
