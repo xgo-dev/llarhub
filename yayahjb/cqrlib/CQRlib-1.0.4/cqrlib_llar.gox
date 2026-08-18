@@ -1,0 +1,131 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const cConsumerSource = `#include <cqrlib.h>
+
+int main(void) {
+    CQRQuaternionHandle q;
+    CQRCreateEmptyQuaternion(&q);
+    return 0;
+}
+`
+
+const cppConsumerSource = `#include <cqrlib.h>
+
+int main() {
+    CPPQR<double> q;
+    return 0;
+}
+`
+
+id "yayahjb/cqrlib"
+
+// CQRlib-1.0.4 is the first upstream tag with the C++ CPPQR consumer API.
+fromVer "CQRlib-1.0.4"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	cmakeLists := ctx.Proj.readFile("CQRlib-1.0.4/CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CQRLIB_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "lgpl.txt"), os.readFile(filepath.join(ctx.SourceDir, "lgpl.txt"))!, 0o644)!
+
+	flags := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lCQRlib",
+	}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		flags = append(flags, "-lm")
+	}
+	ctx.setMetadata strings.join(flags, " ")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	cSource := filepath.join(testDir, "consumer.c")
+	os.writeFile(cSource, []byte(cConsumerSource), 0o644)!
+	cBinary := filepath.join(testDir, "consumer-c")
+	cArgs := []string{
+		cSource,
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lCQRlib",
+	}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		cArgs = append(cArgs, "-lm")
+	}
+	cArgs = append(cArgs, "-o", cBinary)
+	exec "cc", cArgs...
+	lastErr!
+
+	cppSource := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(cppSource, []byte(cppConsumerSource), 0o644)!
+	cppBinary := filepath.join(testDir, "consumer-cpp")
+	cppArgs := []string{
+		cppSource,
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lCQRlib",
+	}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		cppArgs = append(cppArgs, "-lm")
+	}
+	cppArgs = append(cppArgs, "-o", cppBinary)
+	exec "c++", cppArgs...
+	lastErr!
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		if slices.contains(target.require["os"], "windows") {
+			path := os.getenv("PATH")
+			os.setenv("PATH", filepath.join(installDir, "bin")+";"+path)!
+		}
+	}
+
+	exec cBinary
+	lastErr!
+	exec cppBinary
+	lastErr!
+}
