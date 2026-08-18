@@ -1,0 +1,134 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerProgram = `#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+
+#include "streamvbyte.h"
+
+int main(void) {
+	uint32_t N = 100U;
+	uint32_t * datain = malloc(N * sizeof(uint32_t));
+	uint8_t * compressedbuffer = malloc(streamvbyte_max_compressedbytes(N));
+	uint32_t * recovdata = malloc(N * sizeof(uint32_t));
+	for (uint32_t k = 0; k < N; ++k)
+		datain[k] = 120;
+	size_t compsize = streamvbyte_encode(datain, N, compressedbuffer);
+	size_t compsize2 = streamvbyte_decode(compressedbuffer, recovdata, N);
+	assert(compsize == compsize2);
+	free(datain);
+	free(compressedbuffer);
+	free(recovdata);
+	printf("Compressed %d integers down to %d bytes.\n", N, (int) compsize);
+	return 0;
+}
+`
+
+id "fast-pack/streamvbyte"
+
+fromVer "v0.5.0"
+
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	for _, value in target.options["shared"] {
+		if value != "ON" && value != "OFF" {
+			return false
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+
+	// Older tags explicitly disable macOS RPATH. Restore the relocatable
+	// setting when the shared option requires that installed library.
+	if shared {
+		content := string(ctx.Proj.readFile("CMakeLists.txt")!)
+		if strings.contains(content, "set(CMAKE_MACOSX_RPATH OFF)") {
+			patchPath := filepath.join(ctx.SourceDir, "_llar_macos_rpath.patch")
+			patchText := `--- CMakeLists.txt
++++ CMakeLists.txt
+@@ -1,1 +1,1 @@
+-set(CMAKE_MACOSX_RPATH OFF)
++set(CMAKE_MACOSX_RPATH ON)
+`
+			os.writeFile(patchPath, []byte(patchText), 0o644)!
+			patch "--batch", "--forward", "-i", patchPath
+			lastErr!
+		}
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.configure
+	c.build
+	c.install
+
+	// v0.5.0-v0.5.2 install the static target as
+	// libstreamvbyte_static.a; v0.5.3 and newer name it libstreamvbyte.a.
+	library := "streamvbyte"
+	if !shared {
+		_, err := os.stat(filepath.join(installDir, "lib", "libstreamvbyte.a"))
+		if os.isNotExist(err) {
+			library = "streamvbyte_static"
+		} else if err != nil {
+			panic err
+		}
+	}
+	flags := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-l" + library,
+	}
+	ctx.setMetadata strings.join(flags, " ")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerProgram), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	// Keep the cache-hit consumer aligned with the installed archive name.
+	library := "streamvbyte"
+	if !shared {
+		_, err := os.stat(filepath.join(installDir, "lib", "libstreamvbyte.a"))
+		if os.isNotExist(err) {
+			library = "streamvbyte_static"
+		} else if err != nil {
+			panic err
+		}
+	}
+
+	binary := filepath.join(testDir, "consumer")
+	args := []string{
+		sourcePath,
+		"-o", binary,
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-l" + library,
+	}
+	exec "cc", args...
+	lastErr!
+
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec binary
+	lastErr!
+}
