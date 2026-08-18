@@ -1,0 +1,14 @@
+// Keep the upstream test corpus below every numbered release so an unpinned
+// LLAR selection resolves to the latest buildable release instead of corpus.
+compareVer (a, b) => {
+	if a.Version == "corpus" {
+		if b.Version == "corpus" {
+			return 0
+		}
+		return -1
+	}
+	if b.Version == "corpus" {
+		return 1
+	}
+	return gnu.compare(a.Version, b.Version)
+}
