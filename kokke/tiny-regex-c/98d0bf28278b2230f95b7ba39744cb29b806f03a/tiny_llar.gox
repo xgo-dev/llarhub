@@ -1,0 +1,133 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+var cMakeLists = `cmake_minimum_required(VERSION 3.15)
+project(tiny-regex-c LANGUAGES C)
+
+add_library($${PROJECT_NAME} $${TINY_REGEX_C_SRC_DIR}/re.c)
+set_target_properties($${PROJECT_NAME} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+if(RE_DOT_MATCHES_NEWLINE)
+    target_compile_definitions($${PROJECT_NAME} PUBLIC RE_DOT_MATCHES_NEWLINE=1)
+else()
+    target_compile_definitions($${PROJECT_NAME} PUBLIC RE_DOT_MATCHES_NEWLINE=0)
+endif()
+
+include(GNUInstallDirs)
+install(
+    TARGETS $${PROJECT_NAME}
+    RUNTIME DESTINATION $${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION $${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION $${CMAKE_INSTALL_LIBDIR}
+)
+install(FILES $${TINY_REGEX_C_SRC_DIR}/re.h DESTINATION $${CMAKE_INSTALL_INCLUDEDIR})
+`
+
+const consumerSource = `#include <re.h>
+
+#include <stdio.h>
+
+int main(void) {
+    int match_length;
+    const char *string_to_search = "ahem.. 'hello world !' ..";
+    re_t pattern = re_compile("[Hh]ello [Ww]orld\\s*[!]?");
+
+    int match_idx = re_matchp(pattern, string_to_search, &match_length);
+    if (match_idx != -1) {
+        printf("match at idx %i, %i chars long.\n", match_idx, match_length);
+    }
+
+    return 0;
+}
+`
+
+id "kokke/tiny-regex-c"
+
+fromVer "98d0bf28278b2230f95b7ba39744cb29b806f03a"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"dot_matches_newline": "ON",
+}
+
+filter => {
+	for key in []string{"shared", "fPIC", "dot_matches_newline"} {
+		for value in target.options[key] {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	cmakeDir := filepath.join(ctx.SourceDir, "_llar_cmake")
+	os.mkdirAll(cmakeDir, 0o755)!
+	os.writeFile(filepath.join(cmakeDir, "CMakeLists.txt"), []byte(cMakeLists), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	dotMatchesNewline := slices.contains(target.options["dot_matches_newline"], "ON")
+
+	c := cmake.new(cmakeDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "TINY_REGEX_C_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "RE_DOT_MATCHES_NEWLINE", dotMatchesNewline
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	dotDefine := "0"
+	if dotMatchesNewline {
+		dotDefine = "1"
+	}
+	flags := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-DRE_DOT_MATCHES_NEWLINE=" + dotDefine,
+		"-L" + filepath.join(installDir, "lib"),
+		"-ltiny-regex-c",
+	}
+	ctx.setMetadata strings.join(flags, " ")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	dotDefine := "0"
+	if slices.contains(target.options["dot_matches_newline"], "ON") {
+		dotDefine = "1"
+	}
+	shared := slices.contains(target.options["shared"], "ON")
+	binary := filepath.join(testDir, "consumer")
+	exec "cc", "-std=c99",
+		"-I" + filepath.join(installDir, "include"),
+		"-DRE_DOT_MATCHES_NEWLINE=" + dotDefine,
+		consumer,
+		"-L" + filepath.join(installDir, "lib"),
+		"-ltiny-regex-c",
+		"-o", binary
+	lastErr!
+
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec binary
+	lastErr!
+}
