@@ -1,0 +1,177 @@
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+)
+
+id "mackron/miniaudio"
+
+// The CCI recipe serves every listed release with the same split-source
+// interface. The oldest ref is a commit because upstream did not tag 0.10.39.
+fromVer "8bf157f10e278302f8a6c1c9cd1065f2bea26dd2"
+
+defaults {
+	"header_only": "ON",
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "header_only" && name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	headerOnly := slices.contains(target.options["header_only"], "ON")
+	shared := slices.contains(target.options["shared"], "ON") && !headerOnly
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	header := string(os.readFile(filepath.join(ctx.SourceDir, "miniaudio.h"))!)
+	versionParts := map[string]string{}
+	for line in strings.split(header, "\n") {
+		fields := strings.fields(line)
+		if fields.len == 3 && fields[0] == "#define" {
+			versionParts[fields[1]] = fields[2]
+		}
+	}
+	version := strings.join([]string{
+		versionParts["MA_VERSION_MAJOR"],
+		versionParts["MA_VERSION_MINOR"],
+		versionParts["MA_VERSION_REVISION"],
+	}, ".")
+	osName := runtime.GOOS
+	osValues := target.require["os"]
+	if osValues.len > 0 {
+		osName = osValues[0]
+	}
+
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+	if headerOnly {
+		cp filepath.join(ctx.SourceDir, "miniaudio.h"), includeDir
+		lastErr!
+	} else {
+		cmakeLists := ctx.Proj.readFile("8bf157f10e278302f8a6c1c9cd1065f2bea26dd2/CMakeLists.txt")!
+		os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+		c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+		c.define "MINIAUDIO_SRC_DIR", ctx.SourceDir
+		c.define "MINIAUDIO_VERSION_STRING", version
+		c.defineBool "BUILD_SHARED_LIBS", shared
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+		c.configure
+		c.build
+		c.install
+	}
+
+	cp "-R", filepath.join(ctx.SourceDir, "extras"), includeDir
+	lastErr!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), license, 0o644)!
+
+	libs := ""
+	if !headerOnly {
+		libs = "-L$${libdir} -lminiaudio"
+	}
+	if osName == "linux" {
+		libs += " -lm -lpthread -ldl"
+	} else if osName == "freebsd" {
+		libs += " -lm -lpthread"
+	} else if osName == "darwin" {
+		libs += " -framework CoreFoundation -framework CoreAudio -framework AudioUnit"
+	}
+
+	cflags := "-I$${includedir}"
+	if shared {
+		cflags += " -DMA_DLL"
+	}
+	if osName == "darwin" {
+		cflags += " -DMA_NO_RUNTIME_LINKING=1"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: miniaudio
+Description: A single file audio playback and capture library.
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "miniaudio.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("miniaudio")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(`#define MINIAUDIO_IMPLEMENTATION
+#include <miniaudio.h>
+
+#include <stdio.h>
+
+int main(void) {
+  ma_result result;
+  ma_context context;
+  ma_device_info *pPlaybackDeviceInfos;
+  ma_uint32 playbackDeviceCount;
+  ma_device_info *pCaptureDeviceInfos;
+  ma_uint32 captureDeviceCount;
+
+  if (ma_context_init(NULL, 0, NULL, &context) != MA_SUCCESS) {
+    printf("Failed to initialize context.\n");
+    return -2;
+  }
+
+  result = ma_context_get_devices(&context, &pPlaybackDeviceInfos,
+                                  &playbackDeviceCount, &pCaptureDeviceInfos,
+                                  &captureDeviceCount);
+  if (result != MA_SUCCESS) {
+    printf("Failed to retrieve device information.\n");
+    return -3;
+  }
+
+  printf("Playback Devices\n");
+  printf("Capture Devices\n");
+  ma_context_uninit(&context);
+  return 0;
+}
+`), 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("miniaudio")!
+	flagsFile := filepath.join(testDir, "miniaudio.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec "cc", "-std=c99", "@"+flagsFile, consumer, "-o", binary
+	lastErr!
+	os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	exec binary
+	lastErr!
+}
