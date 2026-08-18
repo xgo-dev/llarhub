@@ -1,0 +1,97 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <aes.h>
+
+int main() {
+    aes_encrypt_ctx ctx;
+    char message[] = "test";
+    char key[] = "0123456789ABCDEF";
+    aes_encrypt(message, key, &ctx);
+
+    return 0;
+}
+`
+
+id "xmake-mirror/libaesgm"
+
+fromVer "2013.1.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	cmakeLists := ctx.Proj.readFile("CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "LIBAESGM_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	license := string(os.readFile(filepath.join(ctx.SourceDir, "aes.h"))!)
+	licenseEnd := strings.index(license, "*/")
+	license = strings.replace(license[:licenseEnd], "/*", "", 1)
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), []byte(license), 0o644)!
+
+	metadata := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lAesgm",
+	}
+	ctx.setMetadata strings.join(metadata, " ")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+	binary := filepath.join(testDir, "consumer")
+	args := []string{
+		"-I" + filepath.join(installDir, "include"),
+		sourcePath,
+		"-L" + filepath.join(installDir, "lib"),
+		"-lAesgm",
+		"-o", binary,
+	}
+	exec "cc", args...
+	lastErr!
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec binary
+	lastErr!
+}
