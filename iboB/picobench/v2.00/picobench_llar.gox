@@ -1,0 +1,54 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+id "iboB/picobench"
+
+fromVer "v2.00"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	// Upstream has no install rules. Carry the Conan recipe's header installer
+	// with context shared by every supported upstream tag.
+	patch := ctx.Proj.readFile("v2.00/install.patch")!
+	patchPath := filepath.join(ctx.SourceDir, "_llar_install.patch")
+	os.writeFile(patchPath, patch, 0o644)!
+	git "-C", ctx.SourceDir, "apply", "--unidiff-zero", patchPath
+	lastErr!
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	// The selected Conan recipe sets this for pre-v2.06 tags whose declared
+	// CMake compatibility floor is lower than CMake 4 accepts by default.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "PICOBENCH_BUILD_TOOLS", false
+	c.defineBool "PICOBENCH_BUILD_TESTS", false
+	c.defineBool "PICOBENCH_BUILD_EXAMPLES", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), license, 0o644)!
+
+	ctx.setMetadata "-I" + filepath.join(installDir, "include")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	source := ctx.Proj.readFile("v2.00/consumer.cpp")!
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, source, 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec "c++", "-std=c++11", "-I"+filepath.join(installDir, "include"), consumer, "-o", binary
+	lastErr!
+	exec binary
+	lastErr!
+}
