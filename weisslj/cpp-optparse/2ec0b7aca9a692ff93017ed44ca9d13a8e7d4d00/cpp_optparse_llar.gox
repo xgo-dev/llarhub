@@ -1,0 +1,118 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <string>
+#include <vector>
+
+#include "OptionParser.h"
+
+using optparse::OptionParser;
+using namespace std;
+
+int main(int argc, char *argv[])
+{
+    OptionParser parser = OptionParser() .description("just an example");
+
+    parser.add_option("-f", "--file") .dest("filename")
+                      .help("write report to FILE") .metavar("FILE");
+    parser.add_option("-q", "--quiet")
+                      .action("store_false") .dest("verbose") .set_default("1")
+                      .help("don't print status messages to stdout");
+
+    optparse::Values options = parser.parse_args(argc, argv);
+    vector<string> args = parser.args();
+
+    if (options.get("verbose"))
+        cout << options["filename"] << endl;
+}
+`
+
+// Conan Center cci.20171104 pins weisslj/cpp-optparse to this untagged commit.
+id "weisslj/cpp-optparse"
+
+fromVer "2ec0b7aca9a692ff93017ed44ca9d13a8e7d4d00"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	cmakeLists := ctx.Proj.readFile("2ec0b7aca9a692ff93017ed44ca9d13a8e7d4d00/CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CPP_OPTPARSE_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	metadata := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lOptionParser",
+	}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		metadata <- "-lm"
+	}
+	ctx.setMetadata strings.join(metadata, " ")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	testBuild := filepath.join(testDir, "_build")
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	binary := filepath.join(testBuild, "consumer")
+	os.mkdirAll(testBuild, 0o755)!
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	args := []string{
+		sourcePath,
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lOptionParser",
+	}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		args <- "-lm"
+	}
+	args <- "-o"
+	args <- binary
+	exec "c++", args...
+	lastErr!
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec binary, "--help"
+	lastErr!
+}
