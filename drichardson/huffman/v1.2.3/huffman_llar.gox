@@ -1,0 +1,115 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <stdint.h>
+#include <stdlib.h>
+
+#include "huffman/huffman.h"
+
+int main(void) {
+    uint8_t input[3] = {'a', 'b', 'c'};
+    unsigned char *encoded = NULL;
+    uint32_t encoded_len = 0;
+
+    if (huffman_encode_memory(input, 3, &encoded, &encoded_len) != 0) {
+        return 1;
+    }
+
+    free(encoded);
+    return encoded_len == 0;
+}
+`
+
+id "drichardson/huffman"
+
+// v1.2.3 is the first upstream tag with the CMake build and install contract
+// used by v1.2.3 through v1.2.7.
+fromVer "v1.2.3"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	// Match the Conan recipe's Cygwin source fix while retaining upstream
+	// behavior on native Windows and other platforms.
+	sourcePath := filepath.join(ctx.SourceDir, "huffman.c")
+	source := string(os.readFile(sourcePath)!)
+	source = strings.replace(source, "#ifdef WIN32", "#if defined _WIN32 || defined __CYGWIN__", 1)
+	os.writeFile(sourcePath, []byte(source), 0644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0644)!
+
+	metadata := "-lhuffman"
+	if slices.contains(target.require["os"], "windows") {
+		metadata += " -lws2_32"
+	}
+	ctx.setMetadata metadata
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0644)!
+
+	binary := filepath.join(testDir, "consumer")
+	args := []string{
+		sourcePath,
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lhuffman",
+		"-o", binary,
+	}
+	if slices.contains(target.require["os"], "windows") {
+		args = append(args, "-lws2_32")
+	}
+	exec "cc", args...
+	lastErr!
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		if slices.contains(target.require["os"], "windows") {
+			path := os.getenv("PATH")
+			os.setenv("PATH", filepath.join(installDir, "bin")+";"+path)!
+		}
+	}
+	exec binary
+	lastErr!
+}
