@@ -1,0 +1,76 @@
+import (
+    "os"
+    "path/filepath"
+    "strings"
+)
+
+// Conan Center cci.20210217 pins houseroad/foxi to this commit. The upstream
+// repository has no release tags, so this commit is the only fetchable source
+// ref for the selected recipe snapshot.
+id "houseroad/foxi"
+
+fromVer "bd6feb6d0d3fc903df42b4feb82a602a5fcb1fd5"
+
+onBuild ctx => {
+    installDir := ctx.outputDir
+
+    patch := ctx.Proj.readFile("bd6feb6d0d3fc903df42b4feb82a602a5fcb1fd5/fix-conflicting-types.patch")!
+    patchPath := filepath.join(ctx.SourceDir, "_llar_fix-conflicting-types.patch")
+    os.writeFile(patchPath, patch, 0o644)!
+    patch "-p1", "--batch", "--forward", "-i", patchPath
+    lastErr!
+
+    cmakePatch := ctx.Proj.readFile("bd6feb6d0d3fc903df42b4feb82a602a5fcb1fd5/cmake.patch")!
+    cmakePatchPath := filepath.join(ctx.SourceDir, "_llar_cmake.patch")
+    os.writeFile(cmakePatchPath, cmakePatch, 0o644)!
+    patch "-p1", "--batch", "--forward", "-i", cmakePatchPath
+    lastErr!
+
+    c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+    c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+    c.configure
+    c.build
+    c.install
+
+    licenseDir := filepath.join(installDir, "licenses")
+    os.mkdirAll(licenseDir, 0o755)!
+    license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!
+    os.writeFile(filepath.join(licenseDir, "LICENSE"), license, 0o644)!
+
+    flags := []string{
+        "-I" + filepath.join(installDir, "include"),
+        "-L" + filepath.join(installDir, "lib"),
+        "-lfoxi_dummy",
+        "-lfoxi_loader",
+        "-ldl",
+    }
+    ctx.setMetadata strings.join(flags, " ")
+}
+
+onTest ctx => {
+    installDir := ctx.outputDir
+    testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+    os.mkdirAll(testDir, 0o755)!
+
+    source := ctx.Proj.readFile("bd6feb6d0d3fc903df42b4feb82a602a5fcb1fd5/consumer.c")!
+    sourcePath := filepath.join(testDir, "consumer.c")
+    os.writeFile(sourcePath, source, 0o644)!
+
+    flags := []string{
+        "-I" + filepath.join(installDir, "include"),
+        "-L" + filepath.join(installDir, "lib"),
+        "-lfoxi_dummy",
+        "-lfoxi_loader",
+        "-ldl",
+    }
+    binary := filepath.join(testDir, "consumer")
+    args := []string{sourcePath, "-o", binary}
+    args = append(args, flags...)
+    exec "cc", args...
+    lastErr!
+
+    os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+    os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+    exec binary
+    lastErr!
+}

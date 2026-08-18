@@ -1,0 +1,13 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -65 +64,0 @@
+-  add_msvc_runtime_flag(foxi_loader)
+@@ -104 +102,0 @@
+-  add_msvc_runtime_flag(foxi_dummy)
+@@ -118 +116 @@
+-  EXPORT ONNXTargets DESTINATION lib)
++  EXPORT ONNXTargets RUNTIME DESTINATION bin ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
+@@ -122 +120 @@
+-    EXPORT ONNXTargets DESTINATION lib)
++    EXPORT ONNXTargets RUNTIME DESTINATION bin ARCHIVE DESTINATION lib LIBRARY DESTINATION lib)
