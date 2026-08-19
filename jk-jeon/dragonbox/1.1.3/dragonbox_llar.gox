@@ -45,8 +45,7 @@ onBuild ctx => {
 	patch := ctx.Proj.readFile("1.1.3/dragonbox_include_directory.patch")!
 	patchPath := filepath.join(ctx.SourceDir, "_llar_dragonbox.patch")
 	os.writeFile(patchPath, patch, 0o644)!
-	git "-C", ctx.SourceDir, "apply", "--unidiff-zero", "-p2", patchPath
-	lastErr!
+	git! "-C", ctx.SourceDir, "apply", "--unidiff-zero", "-p2", patchPath
 
 	fPIC := slices.contains(target.options["fPIC"], "ON")
 	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
@@ -59,23 +58,43 @@ onBuild ctx => {
 
 	licenseDir := filepath.join(installDir, "licenses")
 	os.mkdirAll(licenseDir, 0o755)!
-	for name in []string{"LICENSE-Apache2-LLVM", "LICENSE-Boost"} {
+	for name in ["LICENSE-Apache2-LLVM", "LICENSE-Boost"] {
 		license := os.readFile(filepath.join(ctx.SourceDir, name))!
 		os.writeFile(filepath.join(licenseDir, name), license, 0o644)!
 	}
 
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-ldragonbox_to_chars",
+	pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pkgconfigDir, 0o755)!
+	source := string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!)
+	versionNeedle := "project(dragonbox\n        VERSION "
+	versionStart := strings.index(source, versionNeedle)
+	if versionStart < 0 {
+		panic "dragonbox CMakeLists.txt does not declare a project version"
 	}
-	ctx.setMetadata strings.join(flags, " ")
+	versionStart += versionNeedle.len
+	versionEnd := strings.index(source[versionStart:], "\n")
+	if versionEnd < 0 {
+		panic "dragonbox CMakeLists.txt project version is not terminated"
+	}
+	version := strings.trimSpace(source[versionStart : versionStart+versionEnd])
+	pc := `Name: dragonbox
+Description: Dragonbox floating-point to_chars library
+Version: ` + version + `
+prefix=$${pcfiledir}/../..
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+Libs: -L$${libdir} -ldragonbox_to_chars
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pkgconfigDir, "dragonbox.pc"), []byte(pc), 0o644)!
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("dragonbox")!
 }
 
 onTest ctx => {
 	installDir := ctx.outputDir
-	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
-	os.mkdirAll(testDir, 0o755)!
+	testDir := os.mkdirTemp("", "dragonbox-consumer-*")!
+	defer os.removeAll(testDir)
 
 	consumer := filepath.join(testDir, "consumer.cpp")
 	os.writeFile(consumer, []byte(consumerSource), 0o644)!
@@ -83,14 +102,12 @@ onTest ctx => {
 	binary := filepath.join(testDir, "consumer")
 	flags := []string{
 		"-std=c++17",
-		"-I" + filepath.join(installDir, "include"),
 		consumer,
 		"-o", binary,
-		"-L" + filepath.join(installDir, "lib"),
-		"-ldragonbox_to_chars",
 	}
-	exec "c++", flags...
-	lastErr!
-	exec binary
-	lastErr!
+	pkgconfig.use installDir
+	metadataFlags := [strings.replace(flag, `\|`, "|", -1) for flag in strings.fields(pkgconfig.lookup("dragonbox")!)]
+	flags <- metadataFlags...
+	exec! "c++", flags...
+	exec! binary
 }
