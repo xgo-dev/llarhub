@@ -6,7 +6,7 @@ import (
 
 id "strukturag/libde265"
 
-fromVer "v1.0.12"
+fromVer "v1.0.11"
 
 defaults {
 	"shared": "OFF",
@@ -109,12 +109,10 @@ int main(void) {
 	flagsFile := filepath.join(testDir, "libde265.flags")
 	os.writeFile(flagsFile, []byte(flags), 0644)!
 
-	exec "cc", "-std=c11", "@"+flagsFile, consumer, "-o", binary
-	lastErr!
+	cc! "-std=c11", consumer, "-o", binary, "@"+flagsFile
 	if target.options["shared"][0] == "ON" {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
