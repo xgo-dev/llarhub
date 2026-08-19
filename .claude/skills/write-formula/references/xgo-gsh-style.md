@@ -64,6 +64,20 @@ directly:
 - Use `.len` for strings and slices. Use `len(mapping)` for maps; `mapping.len`
   is a lookup of the key `"len"`, not the map length.
 
+### String Construction
+
+- Prefer interpolation for short text containing values with a verified XGo
+  string conversion, for example `"module=${module}"`.
+- Use `+` only when both operands are strings. Convert numeric values explicitly
+  with `.string`, for example `"age = " + age.string`.
+- Use `values.join(separator)` when combining an existing string slice. When
+  assembling many parts, collect the strings and join them instead of folding
+  repeated `+` operations through a loop.
+- Use `sprintf` or `fprintf` for format directives and values that the active
+  ixgo cannot interpolate, such as `bool` or `[]byte`.
+- Do not call compiler implementation helpers such as `stringutil.Concat` from
+  a Formula; resolve the supported syntax against LLAR's active ixgo toolchain.
+
 For example:
 
 ```xgo
