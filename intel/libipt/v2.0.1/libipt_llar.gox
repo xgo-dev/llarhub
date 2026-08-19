@@ -54,37 +54,57 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
 
-	metadata := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lipt",
+	version := map[string]string{}
+	for line in strings.split(string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!), "\n") {
+		fields := strings.fields(line)
+		if fields.len == 2 {
+			name := strings.trimSuffix(fields[0], "(")
+			value := strings.trimSuffix(fields[1], ")")
+			if name == "set(PT_VERSION_MAJOR" || name == "set(PT_VERSION_MINOR" || name == "set(PT_VERSION_PATCH" {
+				version[name] = value
+			}
+		}
 	}
-	ctx.setMetadata strings.join(metadata, " ")
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pcPrefix := "$" + "{pcfiledir}/../.."
+	prefixVar := "$" + "{prefix}"
+	libDirVar := "$" + "{libdir}"
+	includeDirVar := "$" + "{includedir}"
+	pc := "prefix=" + pcPrefix + "\n" +
+		"exec_prefix=" + prefixVar + "\n" +
+		"libdir=" + prefixVar + "/lib\n" +
+		"includedir=" + prefixVar + "/include\n\n" +
+		"Name: libipt\n" +
+		"Description: Intel Processor Trace library\n" +
+		"Version: " + version["set(PT_VERSION_MAJOR"] + "." + version["set(PT_VERSION_MINOR"] + "." + version["set(PT_VERSION_PATCH"] + "\n" +
+		"Libs: -L" + libDirVar + " -lipt\n" +
+		"Cflags: -I" + includeDirVar + "\n"
+	os.writeFile(filepath.join(pcDir, "libipt.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libipt")!
 }
 
 onTest ctx => {
 	installDir := ctx.outputDir
-	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
-	os.mkdirAll(testDir, 0o755)!
+	testDir := os.mkdirTemp("", "libipt-consumer-")!
+	defer os.removeAll(testDir)
 
 	sourcePath := filepath.join(testDir, "consumer.cpp")
 	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
 	binary := filepath.join(testDir, "consumer")
-	args := []string{
-		"-std=c++11",
-		"-I" + filepath.join(installDir, "include"),
-		sourcePath,
-		"-L" + filepath.join(installDir, "lib"),
-		"-lipt",
-		"-o", binary,
-	}
-	exec "c++", args...
-	lastErr!
+
+	pkgconfig.use installDir
+	args := []string{sourcePath, "-std=c++11"}
+	args <- strings.fields(pkgconfig.lookup("libipt")!)...
+	args <- []string{"-o", binary}...
+	exec! "c++", args...
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
