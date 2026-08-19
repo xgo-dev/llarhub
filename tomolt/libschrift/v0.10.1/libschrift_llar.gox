@@ -3,6 +3,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 )
 
 const consumerSource = `#include <stdio.h>
@@ -66,10 +67,41 @@ onBuild ctx => {
 	if osValues.len > 0 {
 		osName = osValues[0]
 	}
-	metadata := "-I" + filepath.join(installDir, "include") + " -L" + filepath.join(installDir, "lib") + " -lschrift"
-	if osName == "linux" || osName == "freebsd" {
-		metadata += " -lm"
+
+	source := string(os.readFile(filepath.join(ctx.SourceDir, "schrift.c"))!)
+	versionNeedle := `#define SCHRIFT_VERSION "`
+	versionStart := strings.index(source, versionNeedle)
+	if versionStart < 0 {
+		panic "libschrift source does not define SCHRIFT_VERSION"
 	}
+	versionStart += versionNeedle.len
+	versionEnd := strings.index(source[versionStart:], `"`)
+	if versionEnd < 0 {
+		panic "libschrift SCHRIFT_VERSION is not terminated"
+	}
+	version := source[versionStart : versionStart+versionEnd]
+
+	libs := "-L$${libdir} -lschrift"
+	if osName == "linux" || osName == "freebsd" {
+		libs += " -lm"
+	}
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: libschrift
+Description: lightweight TrueType font rendering library
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: -I$${includedir}
+`
+	pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pkgconfigDir, 0755)!
+	os.writeFile(filepath.join(pkgconfigDir, "libschrift.pc"), []byte(pc), 0644)!
+
+	pkgconfig.use installDir
+	metadata := pkgconfig.lookup("libschrift")!
 	ctx.setMetadata metadata
 }
 
@@ -81,29 +113,25 @@ onTest ctx => {
 	consumer := filepath.join(testDir, "consumer.c")
 	os.writeFile(consumer, []byte(consumerSource), 0644)!
 
-	osName := runtime.GOOS
-	osValues := target.require["os"]
-	if osValues.len > 0 {
-		osName = osValues[0]
-	}
-	args := []string{
-		"-I" + filepath.join(installDir, "include"),
-		consumer,
-		"-L" + filepath.join(installDir, "lib"),
-		"-lschrift",
-	}
-	if osName == "linux" || osName == "freebsd" {
-		args = append(args, "-lm")
-	}
+	pkgconfig.use installDir
+	flags := [strings.replace(flag, `\|`, "|", -1) for flag in strings.fields(pkgconfig.lookup("libschrift")!)]
+	args := []string{consumer}
+	args <- flags...
 	binary := filepath.join(testDir, "consumer")
-	args = append(args, "-o", binary)
-	exec "cc", args...
-	lastErr!
+	args <- "-o", binary
+	cc! args...
 
 	if slices.contains(target.options["shared"], "ON") {
-		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		osName := runtime.GOOS
+		osValues := target.require["os"]
+		if osValues.len > 0 {
+			osName = osValues[0]
+		}
+		if osName == "darwin" {
+			os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		} else {
+			os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		}
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
