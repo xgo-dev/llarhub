@@ -63,38 +63,41 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
 
-	metadata := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-ltinymidi",
-	}
-	ctx.setMetadata strings.join(metadata, " ")
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: tinymidi
+Description: A small C library for doing MIDI on GNU/Linux
+Version: 3162cf8faff04e26a8daa846618b90326f71b9d5
+Libs: -L$${libdir} -ltinymidi
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "tinymidi.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("tinymidi")!
 }
 
 onTest ctx => {
 	installDir := ctx.outputDir
-	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	testDir := os.mkdirTemp("", "tinymidi-consumer-")!
+	defer os.removeAll(testDir)
 	testSource := filepath.join(testDir, "consumer.c")
-	testBuild := filepath.join(testDir, "_build")
-	binary := filepath.join(testBuild, "consumer")
-	os.mkdirAll(testDir, 0o755)!
-	os.mkdirAll(testBuild, 0o755)!
+	binary := filepath.join(testDir, "consumer")
 	os.writeFile(testSource, []byte(consumerSource), 0o644)!
 
-	args := []string{
-		testSource,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-ltinymidi",
-		"-o", binary,
-	}
-	exec "cc", args...
-	lastErr!
+	pkgconfig.use installDir
+	args := []string{testSource}
+	args <- strings.fields(pkgconfig.lookup("tinymidi")!)...
+	args <- "-o", binary
+	cc! args...
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
