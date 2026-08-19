@@ -126,13 +126,11 @@ onTest ctx => {
 	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	exec "cc", sourcePath, "-o", binary, "@"+flagsFile
-	lastErr!
+	cc! sourcePath, "-o", binary, "@"+flagsFile
 
 	if shared {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
