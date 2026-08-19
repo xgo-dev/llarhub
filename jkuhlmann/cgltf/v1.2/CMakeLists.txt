@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.15)
-project(cgltf C)
+project(cgltf C CXX)
 
 set(SOURCES_DIR ${CMAKE_CURRENT_LIST_DIR}/src)
 
 set(SRC_FILES
   ${SOURCES_DIR}/cgltf.c
-  ${SOURCES_DIR}/cgltf_write.c
+  ${SOURCES_DIR}/cgltf_write.cpp
 )
 set(HEADER_FILES
   ${SOURCES_DIR}/cgltf.h
