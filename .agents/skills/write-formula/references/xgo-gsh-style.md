@@ -38,7 +38,8 @@ rules below.
 Use the simplest verified XGo form whenever it expresses the same behavior
 directly:
 
-- Write callback values as lambdas.
+- Write callback values as lambdas when the target API supplies an expected
+  function type; an untyped standalone lambda has no context for inference.
 - Omit parentheses for a side-effect-only statement call.
 - Use lowercase aliases for exported Go functions and methods.
 - Use auto-properties for zero-argument getters.
@@ -77,6 +78,29 @@ directly:
   ixgo cannot interpolate, such as `bool` or `[]byte`.
 - Do not call compiler implementation helpers such as `stringutil.Concat` from
   a Formula; resolve the supported syntax against LLAR's active ixgo toolchain.
+
+### Collections And Control Flow
+
+- Use inferred list literals `[value1, value2]` and map literals
+  `{"key": value}` for non-empty collections. Give an empty collection an
+  explicit slice or map type, or use `make`, when later assignment or encoding
+  depends on its concrete element types.
+- Use list and map comprehensions for direct transforms and filters, for
+  example `[f(value) for value in values if keep(value)]` and
+  `{key(value): value for value in values}`. Keep side effects and multi-step
+  logic in a loop.
+- Use `for value in values`, `for key, value in mapping`, and a trailing `if`
+  on a `for` loop when the body performs filtered side effects. Use
+  `for i in start:end:step` for a numeric sequence; retain a C-style loop only
+  when its mutable state is the clearest form.
+- Use `<-` only for genuine incremental slice append. Use `append` when the
+  returned slice is the value being composed or passed onward.
+- Compare a map, slice, or pointer with `nil` only when the producing API can
+  return nil. A nil map cannot accept entry assignments; initialize it before
+  writing entries, and do not add nil checks as generic defensive code.
+- Use comma-ok map access when missing data has a verified meaning, for example
+  `value, ok := mapping[key]`; do not use it to hide a required configuration
+  error.
 
 For example:
 
@@ -138,7 +162,9 @@ does not turn command strings into a POSIX shell language.
   `exec! {"CC": compiler}, "./configure", "--disable-shared"`.
 - Use `capout` only when the Formula consumes stdout. Put `!` on a required
   command inside the capture block before reading `output`; stderr is not part
-  of the captured value.
+  of the captured value. Under LLAR's broker, this captures gsh child-command
+  stdout; it does not make arbitrary XGo `echo` or `println` output part of
+  `output`.
 - Use the explicit argument form when arguments must remain separate.
 - Treat the one-string `exec` form as whitespace splitting followed by
   environment expansion, without resplitting, unless the selected gsh source
@@ -163,3 +189,18 @@ filesystem traversal, archive formats, and source manifest parsing instead of
 reimplementing parsers with shell text processing. XGo exposes common `fmt`
 operations as builtins; use `fprintf!`, `fprintln!`, `sprintf`, `errorf`, and
 related forms without importing or qualifying `fmt`.
+
+Imports remain explicit unless the resolved LLAR `gox.mod` registers an
+auto-import. In the pinned Formula contract, `cmake` and `autotools` are
+registered helpers; ordinary packages such as `os`, `strings`, `slices`, and
+`encoding/json` still require an import. Resolve this list against the active
+LLAR revision instead of assuming a helper is globally available.
+
+Use lowercase XGo aliases and auto-properties only for verified exported Go
+functions and zero-argument getters, such as `filepath.join`, `ctx.outputDir`,
+and `entry.isDir`. Keep parentheses for nested calls and calls whose result is
+consumed; omit them for side-effect-only command statements. LLAR build
+helpers whose methods return no error, such as
+`c.configure`, `c.build`, `c.install`, and `pkgconfig.use`, are called directly;
+use `!` for separate gsh or Go operations that return an error, such as
+`pkgconfig.lookup`.
