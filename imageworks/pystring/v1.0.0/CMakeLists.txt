@@ -1,0 +1,19 @@
+cmake_minimum_required(VERSION 3.15)
+set(PYSTRING_VERSION "1.0.0" CACHE STRING "Pystring version")
+project(pystring LANGUAGES CXX VERSION ${PYSTRING_VERSION})
+
+include(GNUInstallDirs)
+
+add_library(pystring ${PYSTRING_SRC_DIR}/pystring.cpp)
+set_property(TARGET pystring PROPERTY WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+
+install(TARGETS pystring
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+install(FILES ${PYSTRING_SRC_DIR}/pystring.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+configure_file(${PYSTRING_PC_IN} ${CMAKE_CURRENT_BINARY_DIR}/pystring.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pystring.pc
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
