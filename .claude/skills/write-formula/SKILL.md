@@ -1,6 +1,6 @@
 ---
 name: write-formula
-description: Create, migrate, review, debug, and validate LLAR Formula modules, including versions.json, _llar.gox recipes, _cmp.gox comparators, dependency discovery, build matrices, gsh commands, CMake and Autotools builds, metadata, and consumer tests. Use for work in llarhub or another LLAR Formula store, especially when the Formula should use idiomatic XGo and gsh rather than Go-shaped boilerplate.
+description: Use when creating, migrating, reviewing, debugging, or validating LLAR Formula modules in llarhub or another Formula store, including versions.json, _llar.gox recipes, _cmp.gox comparators, dependency discovery, build matrices, gsh commands, CMake and Autotools builds, metadata, and consumer tests.
 argument-hint: "[owner/repo] [version]"
 allowed-tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch
 ---
@@ -9,7 +9,8 @@ allowed-tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch
 
 Treat a Formula as an XGo classfile that composes LLAR's Formula contract with
 the gsh execution surface. Write idiomatic XGo/gsh source, not Go code with a
-`.gox` suffix.
+`.gox` suffix. Use the simplest verified XGo/gsh form that preserves the
+required semantics.
 
 ## Establish The Contract
 
@@ -44,8 +45,9 @@ documentation as a substitute for that source.
 5. Implement the smallest Formula that preserves the verified installed
    consumer interface. Prefer the LLAR build-system helper matching upstream;
    use inherited gsh commands for verified steps the helper does not own.
-6. Perform an XGo style pass. Prefer the verified XGo/gsh forms from the style
-   reference wherever they make the same logic shorter and clearer.
+6. Perform an XGo style pass. Replace redundant setup, error checks, package
+   qualifiers, and temporary collections with the simpler verified XGo/gsh
+   form from the style reference.
 7. Compile through LLAR's actual ixgo path, then run the target repository's
    Formula validation for exact and representative versions, options, and
    cache-hit tests required by the change.
@@ -73,13 +75,24 @@ LLAR's configured streams, working directory, and execution path.
   configuration.
 - Keep imports, types, fields, and classfile methods before the first top-level
   executable Formula statement.
-- Start the Formula filename stem with a lowercase ASCII letter, for example
-  `picobench_llar.gox`. Do not capitalize it from a repository or type name.
+- In llarhub, start the Formula filename stem with a lowercase ASCII letter,
+  for example `picobench_llar.gox`. Do not capitalize it from a repository or
+  type name even when LLAR accepts that spelling.
 - Use only callback signatures and APIs found in the resolved LLAR revision.
 - Never call generated `XGot_`, `Gopt_`, `Gops_`, `Gopx_`, `Gopo_`, or numbered
   overload names from Formula source.
 - Fail every required command or required error-returning operation. Branch on
   an error only when its distinct outcomes have verified meaning.
+- Put `!` on a required error-returning outer call, including a gsh command
+  inside `capout`. Keep parentheses when the result is consumed. Do not add `!`
+  to a void helper that fails internally, or use `lastErr!` when direct `!` has
+  the required semantics; read `lastErr` only for verified control flow.
+- Use unqualified XGo format builtins such as `fprintf!`, `fprintln!`,
+  `sprintf`, and `errorf`; do not import or prefix `fmt` only to call their Go
+  equivalents.
+  Prefer `${expr}` only when the expression has a verified XGo string
+  conversion. Use a format builtin for bool, `[]byte`, formatting directives,
+  or any value the active ixgo cannot interpolate.
 - Keep commands inside Formula lifecycle hooks; top-level Formula statements
   register configuration and callbacks.
 - Derive metadata from the installed consumer interface and verify it with a
