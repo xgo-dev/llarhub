@@ -12,12 +12,16 @@ Reuse applicable idioms demonstrated there:
 - auto-properties such as `entry.isDir`, `output.trimSpace`, and `values.len`;
 - XGo loops such as `for value in values`;
 - lambdas such as `(_, entry, err) => { ... }`;
-- list comprehensions for real collection transformations;
+- direct list comprehensions for complete collection transformations;
 - typed empty collections when the empty value's type or encoded form matters;
-- `<-` for slice append;
+- `<-` only for genuine incremental slice append;
 - `expr!` for operations that must succeed;
 - `$NAME` for environment values exposed by the gsh class;
-- direct commands, `capout`, `lastErr!`, and `output` for external processes.
+- `command! args`, `capout => { command! args }`, and `output` for required
+  external processes;
+- `${expr}` for plain string construction and panic messages;
+- unqualified format builtins such as `fprintf!` when a format string is
+  clearer than interpolation.
 
 Do not copy its Git diff policy, GitHub output handling, filesystem rules, or
 top-level execution shape into a Formula. A `.gsh` project executes its script
@@ -30,7 +34,8 @@ rules below.
 
 ## XGo-First Formula Style
 
-Prefer verified XGo forms whenever they express the same behavior directly:
+Prefer the shortest verified XGo form whenever it expresses the same behavior
+directly:
 
 - Write callback values as lambdas.
 - Omit parentheses for a side-effect-only statement call.
@@ -41,7 +46,23 @@ Prefer verified XGo forms whenever they express the same behavior directly:
   equivalent operation supported by the active XGo version.
 - Use a comprehension when it is a direct filter or transform, not when it
   hides stateful control flow or changes empty-value semantics.
-- Use `operation()!` when every failure must abort the current panic boundary.
+- Use command-style calls and `!` when every failure must abort the current
+  panic boundary.
+- Use unqualified XGo builtins instead of a `fmt.` prefix. Prefer `${expr}` to
+  `sprintf` when no formatting directive is needed.
+- When an interpolation expression needs a string literal, use a raw string
+  inside the braces, for example `${values.join(`, `)}`.
+
+For example:
+
+```xgo
+capout => { git! "merge-base", baseSHA, headSHA }
+diffBase := output.trimSpace
+
+changedModules := [module for module, _ in modules]
+panic "invalid module ${module}"
+fprintf! outputFile, "modules=%s\n", modulesJSON
+```
 
 After drafting, review Go-shaped candidates such as unused-index `range` loops,
 manual panic-on-error blocks, uppercase imported calls, and parenthesized
@@ -57,11 +78,15 @@ type conversions solely to demonstrate language features.
 Match syntax to semantics:
 
 - Use `!` for a required operation whose only valid result is success.
+- For a required gsh command, attach `!` to the command itself. Inside a
+  capture block, write `capout => { command! args }`.
 - Inspect an error explicitly when absence, unsupported input, or another error
   class changes the Formula's behavior.
 - Accumulate errors only when the active Formula contract exposes an error list
   and the operations are genuinely independent.
-- Check gsh command status immediately; the next command replaces `lastErr`.
+- Read `lastErr` only when command failure is an expected value that selects a
+  verified branch. Do not use `lastErr!` after a required command when the
+  command-style `!` form is available.
 
 Do not replace meaningful error classification with `!`. Do not expand a
 required operation into repetitive `if err != nil { panic err }` code.
@@ -77,8 +102,8 @@ does not turn command strings into a POSIX shell language.
   arguments.
 - Use `exec` only for paths, names containing punctuation, keywords, collisions,
   or explicit environment overlays.
-- Use `capout` only when the Formula consumes stdout; validate the command before
-  reading `output`.
+- Use `capout` only when the Formula consumes stdout. Put `!` on a required
+  command inside the capture block before reading `output`.
 - Use the explicit argument form when arguments must remain separate.
 - Treat the one-string `exec` form as field splitting plus environment
   expansion unless the selected gsh source proves otherwise.
@@ -98,4 +123,6 @@ command and compile through the active ixgo path.
 Using a Go package does not make Formula source Go-first. XGo is designed to
 call Go libraries. Use structured Go APIs through XGo spelling for JSON, YAML,
 filesystem traversal, archive formats, and source manifest parsing instead of
-reimplementing parsers with shell text processing.
+reimplementing parsers with shell text processing. XGo exposes common `fmt`
+operations as builtins; use `fprintf!`, `sprintf`, `errorf`, and related forms
+without importing or qualifying `fmt`.

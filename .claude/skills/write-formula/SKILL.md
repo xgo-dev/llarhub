@@ -9,7 +9,8 @@ allowed-tools: Read, Grep, Glob, Bash, Write, Edit, WebFetch
 
 Treat a Formula as an XGo classfile that composes LLAR's Formula contract with
 the gsh execution surface. Write idiomatic XGo/gsh source, not Go code with a
-`.gox` suffix.
+`.gox` suffix. Prefer the shortest verified XGo/gsh form that preserves the
+required semantics.
 
 ## Establish The Contract
 
@@ -44,8 +45,9 @@ documentation as a substitute for that source.
 5. Implement the smallest Formula that preserves the verified installed
    consumer interface. Prefer the LLAR build-system helper matching upstream;
    use inherited gsh commands for verified steps the helper does not own.
-6. Perform an XGo style pass. Prefer the verified XGo/gsh forms from the style
-   reference wherever they make the same logic shorter and clearer.
+6. Perform an XGo style pass. Replace redundant setup, error checks, package
+   qualifiers, and temporary collections with the shorter verified XGo/gsh
+   form from the style reference.
 7. Compile through LLAR's actual ixgo path, then run the target repository's
    Formula validation for exact and representative versions, options, and
    cache-hit tests required by the change.
@@ -80,6 +82,15 @@ LLAR's configured streams, working directory, and execution path.
   overload names from Formula source.
 - Fail every required command or required error-returning operation. Branch on
   an error only when its distinct outcomes have verified meaning.
+- Put `!` on a required gsh command itself, including inside `capout`; do not
+  follow it with a separate `lastErr!` when `command! args` has the same
+  semantics. Read `lastErr` only when command failure changes control flow.
+- Use unqualified XGo format builtins such as `fprintf!`, `sprintf`, and
+  `errorf`; do not import or prefix `fmt` only to call their Go equivalents.
+  Prefer `${expr}` interpolation when constructing a plain string.
+- Assign a direct list comprehension when it is the complete transformation.
+  Do not create an empty slice and append the same comprehension unless a
+  proved empty-value representation requires it.
 - Keep commands inside Formula lifecycle hooks; top-level Formula statements
   register configuration and callbacks.
 - Derive metadata from the installed consumer interface and verify it with a
