@@ -1,7 +1,6 @@
 import (
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -19,11 +18,11 @@ onBuild ctx => {
 	cmakeLists := `cmake_minimum_required(VERSION 3.8)
 project(LUrlParser LANGUAGES CXX)
 
-add_library(lurlparser ${LURLPARSER_SRC_DIR}/LUrlParser.cpp)
-target_include_directories(lurlparser PRIVATE ${LURLPARSER_SRC_DIR})
+add_library(lurlparser ../LUrlParser.cpp)
+target_include_directories(lurlparser PRIVATE ../)
 target_compile_features(lurlparser PRIVATE cxx_std_11)
 set_target_properties(lurlparser PROPERTIES
-    PUBLIC_HEADER ${LURLPARSER_SRC_DIR}/LUrlParser.h
+    PUBLIC_HEADER ../LUrlParser.h
     CMAKE_CXX_STANDARD_REQUIRED ON
     CMAKE_CXX_EXTENSIONS OFF
     WINDOWS_EXPORT_ALL_SYMBOLS ON
@@ -41,7 +40,6 @@ install(
 	os.writeFile(filepath.join(projectDir, "CMakeLists.txt"), []byte(cmakeLists), 0644)!
 
 	c := cmake.new(projectDir, filepath.join(ctx.SourceDir, "_build"), installDir)
-	c.define "LURLPARSER_SRC_DIR", ctx.SourceDir
 	c.define "CMAKE_INSTALL_LIBDIR", "lib"
 	c.defineBool "BUILD_SHARED_LIBS", false
 	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
@@ -49,21 +47,27 @@ install(
 	c.build
 	c.install
 
-	license := ctx.Proj.readFile("License.txt")!
+	license := os.readFile(filepath.join(ctx.SourceDir, "License.txt"))!
 	licenseDir := filepath.join(installDir, "licenses")
 	os.mkdirAll(licenseDir, 0755)!
 	os.writeFile(filepath.join(licenseDir, "License.txt"), license, 0644)!
 
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-llurlparser",
-	}
-	if slices.contains(target.require["os"], "linux") ||
-		slices.contains(target.require["os"], "freebsd") {
-		flags <- "-lm"
-	}
-	ctx.setMetadata strings.join(flags, " ")
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0755)!
+	dollar := "$"
+	pc := "prefix=" + dollar + "{pcfiledir}/../..\n" +
+		"exec_prefix=" + dollar + "{prefix}\n" +
+		"libdir=" + dollar + "{prefix}/lib\n" +
+		"includedir=" + dollar + "{prefix}/include\n\n" +
+		"Name: lurlparser\n" +
+		"Description: Lightweight URL & URI parser\n" +
+		"Version: 1.1\n" +
+		"Libs: -L" + dollar + "{libdir} -llurlparser\n" +
+		"Cflags: -I" + dollar + "{includedir}\n"
+	os.writeFile(filepath.join(pcDir, "lurlparser.pc"), []byte(pc), 0644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("lurlparser")!
 }
 
 onTest ctx => {
@@ -97,25 +101,14 @@ int main() {
 	os.writeFile(sourcePath, []byte(source), 0644)!
 
 	binary := filepath.join(testDir, "consumer")
-	args := []string{
-		sourcePath,
-		"-std=c++11",
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-llurlparser",
-	}
-	if slices.contains(target.require["os"], "linux") ||
-		slices.contains(target.require["os"], "freebsd") {
-		args <- "-lm"
-	}
+	pkgconfig.use installDir
+	flags := strings.fields(pkgconfig.lookup("lurlparser")!)
+	args := []string{sourcePath, "-std=c++11"}
+	args <- flags...
 	args <- "-o", binary
 
 	exec "c++", args...
-	if lastErr != nil {
-		panic lastErr
-	}
+	lastErr!
 	exec binary
-	if lastErr != nil {
-		panic lastErr
-	}
+	lastErr!
 }
