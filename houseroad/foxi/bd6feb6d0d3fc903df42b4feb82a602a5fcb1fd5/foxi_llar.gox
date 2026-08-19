@@ -1,6 +1,7 @@
 import (
     "os"
     "path/filepath"
+    "slices"
     "strings"
 )
 
@@ -37,12 +38,15 @@ onBuild ctx => {
     license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!
     os.writeFile(filepath.join(licenseDir, "LICENSE"), license, 0o644)!
 
+    // Upstream installs no pkg-config file; match Conan's package_info link contract.
     flags := []string{
         "-I" + filepath.join(installDir, "include"),
         "-L" + filepath.join(installDir, "lib"),
         "-lfoxi_dummy",
         "-lfoxi_loader",
-        "-ldl",
+    }
+    if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+        flags <- "-ldl"
     }
     ctx.setMetadata strings.join(flags, " ")
 }
@@ -61,7 +65,9 @@ onTest ctx => {
         "-L" + filepath.join(installDir, "lib"),
         "-lfoxi_dummy",
         "-lfoxi_loader",
-        "-ldl",
+    }
+    if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+        flags <- "-ldl"
     }
     binary := filepath.join(testDir, "consumer")
     args := []string{sourcePath, "-o", binary}
