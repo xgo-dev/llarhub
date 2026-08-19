@@ -65,12 +65,17 @@ onTest ctx => {
     }
     binary := filepath.join(testDir, "consumer")
     args := []string{sourcePath, "-o", binary}
-    args = append(args, flags...)
-    exec "cc", args...
+    args <- flags...
+    cc args...
     lastErr!
 
     os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
     os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-    exec binary
+    _, err := os.stat(filepath.join(installDir, "lib", "libfoxi.dylib"))
+    libraryName := "libfoxi.so"
+    if err == nil {
+        libraryName = "libfoxi.dylib"
+    }
+    exec binary, filepath.join(installDir, "lib", libraryName)
     lastErr!
 }

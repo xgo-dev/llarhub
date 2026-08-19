@@ -2,12 +2,13 @@
 
 #include <stdio.h>
 
-int main(void) {
+int main(int argc, char** argv) {
     struct onnxifi_library onnx;
-    int ret = onnxifi_load(ONNXIFI_LOADER_FLAG_VERSION_1_0, NULL, &onnx);
+    const char* path = argc > 1 ? argv[1] : NULL;
+    int ret = onnxifi_load(ONNXIFI_LOADER_FLAG_VERSION_1_0, path, &onnx);
     if (!ret) {
-        printf("Cannot load onnxifi lib\n");
-        return 0;
+        fprintf(stderr, "Cannot load onnxifi lib\n");
+        return 1;
     }
     onnxifi_unload(&onnx);
     return 0;
