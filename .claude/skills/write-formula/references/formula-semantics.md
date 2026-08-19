@@ -25,8 +25,9 @@ the comparator's input rules and the complete set must have the intended total
 order. In particular, use a semantic-version comparator only when every tag is
 valid semantic-version syntax.
 
-Start every `_llar.gox` filename stem with a lowercase ASCII letter. For
-example, use `picobench_llar.gox`, not `Picobench_llar.gox`.
+In llarhub, start every `_llar.gox` filename stem with a lowercase ASCII letter.
+For example, use `picobench_llar.gox`, not `Picobench_llar.gox`; do not present
+this convention as an LLAR parser limit.
 
 ## Upstream Investigation
 
@@ -53,6 +54,11 @@ When dependency versions vary inside a Formula range and upstream records them
 in a stable machine-readable source file, discover them from the requested tag
 through the active Formula dependency hook. Parse structured formats with a
 structured parser.
+
+Resolve source ownership separately for every hook. Do not assume a project
+filesystem exposed during dependency discovery refers to the same source as a
+build context. During build or test, use the upstream source directory exposed
+by the active context unless that LLAR revision proves another API owns it.
 
 Use `versions.json` according to the selected LLAR loader's actual reconciliation
 rules. Treat static dependency entries as verified conservative data, not as a
@@ -86,7 +92,9 @@ Install the complete public result into the current module's output directory.
 Do not depend on a build scratch path after the build callback returns.
 
 For an unsupported build system, use gsh commands with separate arguments and
-explicit failure propagation. Add a shell only when the verified upstream step
+explicit failure propagation. Call active CMake or Autotools helper methods
+according to their real return contract; do not add `!` to a void helper that
+already panics on failure. Add a shell only when the verified upstream step
 requires shell grammar.
 
 ## Metadata
