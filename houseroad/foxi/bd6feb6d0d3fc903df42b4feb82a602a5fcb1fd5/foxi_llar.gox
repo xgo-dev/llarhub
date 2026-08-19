@@ -1,7 +1,7 @@
 import (
     "os"
     "path/filepath"
-    "slices"
+    "runtime"
     "strings"
 )
 
@@ -18,14 +18,12 @@ onBuild ctx => {
     patch := ctx.Proj.readFile("bd6feb6d0d3fc903df42b4feb82a602a5fcb1fd5/fix-conflicting-types.patch")!
     patchPath := filepath.join(ctx.SourceDir, "_llar_fix-conflicting-types.patch")
     os.writeFile(patchPath, patch, 0o644)!
-    patch "-p1", "--batch", "--forward", "-i", patchPath
-    lastErr!
+    patch! "-p1", "--batch", "--forward", "-i", patchPath
 
     cmakePatch := ctx.Proj.readFile("bd6feb6d0d3fc903df42b4feb82a602a5fcb1fd5/cmake.patch")!
     cmakePatchPath := filepath.join(ctx.SourceDir, "_llar_cmake.patch")
     os.writeFile(cmakePatchPath, cmakePatch, 0o644)!
-    patch "-p1", "--batch", "--forward", "-i", cmakePatchPath
-    lastErr!
+    patch! "-p1", "--batch", "--forward", "-i", cmakePatchPath
 
     c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
     c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
@@ -38,50 +36,62 @@ onBuild ctx => {
     license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!
     os.writeFile(filepath.join(licenseDir, "LICENSE"), license, 0o644)!
 
-    // Upstream installs no pkg-config file; match Conan's package_info link contract.
-    flags := []string{
-        "-I" + filepath.join(installDir, "include"),
-        "-L" + filepath.join(installDir, "lib"),
-        "-lfoxi_dummy",
-        "-lfoxi_loader",
+    // Upstream installs no pkg-config file. Build one from its installed
+    // headers, libraries, VERSION_NUMBER, and Conan's verified link contract.
+    version := strings.trimSpace(string(os.readFile(filepath.join(ctx.SourceDir, "VERSION_NUMBER"))!))
+    pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: foxi
+Description: ONNXIFI with Facebook Extension
+Version: ` + version + `
+Libs: -L$${libdir} -lfoxi_dummy -lfoxi_loader`
+    osName := runtime.GOOS
+    osValues := target.require["os"]
+    if osValues.len > 0 {
+        osName = osValues[0]
     }
-    if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
-        flags <- "-ldl"
+    if osName == "linux" || osName == "freebsd" {
+        pc += " -ldl"
     }
-    ctx.setMetadata strings.join(flags, " ")
+    pc += `
+Cflags: -I$${includedir}
+`
+    pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+    os.mkdirAll(pkgconfigDir, 0o755)!
+    os.writeFile(filepath.join(pkgconfigDir, "foxi.pc"), []byte(pc), 0o644)!
+
+    pkgconfig.use installDir
+    ctx.setMetadata pkgconfig.lookup("foxi")!
 }
 
 onTest ctx => {
     installDir := ctx.outputDir
-    testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
-    os.mkdirAll(testDir, 0o755)!
+    testDir := os.mkdirTemp("", "foxi-consumer-*")!
+    defer os.removeAll(testDir)
 
     source := ctx.Proj.readFile("bd6feb6d0d3fc903df42b4feb82a602a5fcb1fd5/consumer.c")!
     sourcePath := filepath.join(testDir, "consumer.c")
     os.writeFile(sourcePath, source, 0o644)!
 
-    flags := []string{
-        "-I" + filepath.join(installDir, "include"),
-        "-L" + filepath.join(installDir, "lib"),
-        "-lfoxi_dummy",
-        "-lfoxi_loader",
-    }
-    if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
-        flags <- "-ldl"
-    }
     binary := filepath.join(testDir, "consumer")
-    args := []string{sourcePath, "-o", binary}
-    args <- flags...
-    cc args...
-    lastErr!
+    pkgconfig.use installDir
+    flagsFile := filepath.join(testDir, "foxi.flags")
+    os.writeFile(flagsFile, []byte(pkgconfig.lookup("foxi")!), 0o644)!
+    cc! sourcePath, "-o", binary, "@"+flagsFile
 
+    osName := runtime.GOOS
+    osValues := target.require["os"]
+    if osValues.len > 0 {
+        osName = osValues[0]
+    }
     os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
     os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-    _, err := os.stat(filepath.join(installDir, "lib", "libfoxi.dylib"))
     libraryName := "libfoxi.so"
-    if err == nil {
+    if osName == "darwin" {
         libraryName = "libfoxi.dylib"
     }
-    exec binary, filepath.join(installDir, "lib", libraryName)
-    lastErr!
+    exec! binary, filepath.join(installDir, "lib", libraryName)
 }
