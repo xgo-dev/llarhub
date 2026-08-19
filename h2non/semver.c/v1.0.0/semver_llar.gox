@@ -100,8 +100,8 @@ onTest ctx => {
 	cc! consumer, "@${flagsFile}", "-o", binary
 
 	if shared {
-		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv! "LD_LIBRARY_PATH", filepath.join(installDir, "lib")
+		os.setenv! "DYLD_LIBRARY_PATH", filepath.join(installDir, "lib")
 	}
 	exec! binary
 }
