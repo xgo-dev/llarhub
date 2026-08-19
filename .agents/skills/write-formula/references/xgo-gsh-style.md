@@ -9,7 +9,8 @@ Formula. It is an executable style sample, not a Formula API reference.
 Reuse applicable idioms demonstrated there:
 
 - lowercase-first-letter calls such as `filepath.join` and `json.marshal`;
-- auto-properties such as `entry.isDir`, `output.trimSpace`, and `values.len`;
+- auto-properties such as `entry.isDir`, `output.trimSpace`, and the string or
+  slice property `values.len`;
 - XGo loops such as `for value in values`;
 - lambdas such as `(_, entry, err) => { ... }`;
 - direct list comprehensions for complete collection transformations;
@@ -46,12 +47,22 @@ directly:
   equivalent operation supported by the active XGo version.
 - Use a comprehension when it is a direct filter or transform, not when it
   hides stateful control flow or changes empty-value semantics.
-- Use command-style calls and `!` when every failure must abort the current
-  panic boundary.
+- Use `{value for value in values if condition}` for the first matching value
+  and optional `value, ok` result. Use `{for value in values if condition}` for
+  an existence check when first-match or any-match semantics are intended. Do
+  not hide stateful actions in either form.
+- Use command style for the outermost side-effect call. Attach `!` before its
+  arguments when it must succeed, for example `format.node! buf, fset, file`.
+  Keep parentheses for nested calls and calls whose result is consumed, for
+  example `value := parse(input)!`.
 - Use unqualified XGo builtins instead of a `fmt.` prefix. Prefer `${expr}` to
-  `sprintf` when no formatting directive is needed.
+  `sprintf` only when the expression has a verified XGo string conversion.
+  Bool, `[]byte`, formatting directives, and unsupported conversions require
+  `sprintf`, `fprintf`, or separate output arguments.
 - When an interpolation expression needs a string literal, use a raw string
   inside the braces, for example `${values.join(`, `)}`.
+- Use `.len` for strings and slices. Use `len(mapping)` for maps; `mapping.len`
+  is a lookup of the key `"len"`, not the map length.
 
 For example:
 
@@ -77,9 +88,16 @@ type conversions solely to demonstrate language features.
 
 Match syntax to semantics:
 
-- Use `!` for a required operation whose only valid result is success.
-- For a required gsh command, attach `!` to the command itself. Inside a
-  capture block, write `capout => { command! args }`.
+- Use `!` for a required error-returning operation whose only valid result is
+  success. Do not attach it to a void LLAR helper that already panics on failure.
+- For a required error-returning side-effect call, attach `!` to the outer
+  command-style call.
+  Inside a capture block, write `capout => { command! args }`. When a result is
+  consumed, keep expression syntax such as `value := operation(args)!`.
+- Use `?` only in a function that returns an error. When the resolved lifecycle
+  callback returns no error, use `!` or inspect the error there. Use `?:` only
+  for a source-backed default, not as a defensive fallback for a failed build
+  operation.
 - Inspect an error explicitly when absence, unsupported input, or another error
   class changes the Formula's behavior.
 - Accumulate errors only when the active Formula contract exposes an error list
@@ -101,12 +119,17 @@ does not turn command strings into a POSIX shell language.
   Do not wrap such a command in `exec` merely because it has flags or multiple
   arguments.
 - Use `exec` only for paths, names containing punctuation, keywords, collisions,
-  or explicit environment overlays.
+  or explicit environment overlays. Prefer the map overload for a per-command
+  overlay, for example
+  `exec! {"CC": compiler}, "./configure", "--disable-shared"`.
 - Use `capout` only when the Formula consumes stdout. Put `!` on a required
-  command inside the capture block before reading `output`.
+  command inside the capture block before reading `output`; stderr is not part
+  of the captured value.
 - Use the explicit argument form when arguments must remain separate.
-- Treat the one-string `exec` form as field splitting plus environment
-  expansion unless the selected gsh source proves otherwise.
+- Treat the one-string `exec` form as whitespace splitting followed by
+  environment expansion, without resplitting, unless the selected gsh source
+  proves otherwise. Quotes do not group fields under this implementation, and
+  prefix overlays do not affect later `$NAME` expansion in the same string.
 - Invoke a verified shell explicitly when a build step truly requires pipes,
   redirection, globbing, command substitution, or shell operators.
 
@@ -124,5 +147,5 @@ Using a Go package does not make Formula source Go-first. XGo is designed to
 call Go libraries. Use structured Go APIs through XGo spelling for JSON, YAML,
 filesystem traversal, archive formats, and source manifest parsing instead of
 reimplementing parsers with shell text processing. XGo exposes common `fmt`
-operations as builtins; use `fprintf!`, `sprintf`, `errorf`, and related forms
-without importing or qualifying `fmt`.
+operations as builtins; use `fprintf!`, `fprintln!`, `sprintf`, `errorf`, and
+related forms without importing or qualifying `fmt`.
