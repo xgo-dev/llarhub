@@ -1,8 +1,10 @@
 name: Test formulas
 
 on:
-  pull_request:
   push:
+    branches:
+      - main
+  pull_request:
 
 permissions:
   contents: read
@@ -28,7 +30,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v7
         with:
-          go-version: 1.24.0
+          go-version: 1.25.0
           cache: false
 
       - name: Find changed modules
@@ -40,7 +42,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
           REF_NAME: ${{ github.ref_name }}
         run: |
-          go install -tags=linknamefix -ldflags="-checklinkname=0" github.com/goplus/ixgo/cmd/ixgo@v1.1.1
+          go install -tags=linknamefix -ldflags="-checklinkname=0" github.com/goplus/ixgo/cmd/ixgo@latest
           "$(go env GOPATH)/bin/ixgo" run .github/scripts/find_changed_modules.gsh
 
   test:
