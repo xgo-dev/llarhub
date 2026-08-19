@@ -62,12 +62,26 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), []byte(license), 0o644)!
 
-	metadata := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lAesgm",
-	}
-	ctx.setMetadata strings.join(metadata, " ")
+	// The upstream 2013.1.1 source has no package metadata. Publish the
+	// installed Aesgm interface as a relocatable pkg-config file instead of
+	// embedding this build's output directory in Formula metadata.
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: Aesgm
+Description: Library implementation of AES cryptographic methods
+Version: 2013.1.1
+Libs: -L$${libdir} -lAesgm
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "Aesgm.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("Aesgm")!
 }
 
 onTest ctx => {
@@ -78,20 +92,16 @@ onTest ctx => {
 	sourcePath := filepath.join(testDir, "consumer.c")
 	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
 	binary := filepath.join(testDir, "consumer")
-	args := []string{
-		"-I" + filepath.join(installDir, "include"),
-		sourcePath,
-		"-L" + filepath.join(installDir, "lib"),
-		"-lAesgm",
-		"-o", binary,
-	}
-	exec "cc", args...
-	lastErr!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("Aesgm")!
+	flagsFile := filepath.join(testDir, "Aesgm.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+	cc! sourcePath, "@"+flagsFile, "-o", binary
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
