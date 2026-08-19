@@ -2,6 +2,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 id "iczelia/bzip3"
@@ -47,6 +48,15 @@ onBuild ctx => {
 	c.build
 	c.install
 
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "bzip3.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix=" + installDir, "prefix=$${pcfiledir}/../..", 1)
+	pc = strings.replace(pc, "exec_prefix=" + installDir, "exec_prefix=$${prefix}", 1)
+	pc = strings.replace(pc, "bindir=" + filepath.join(installDir, "bin"), "bindir=$${exec_prefix}/bin", 1)
+	pc = strings.replace(pc, "libdir=" + filepath.join(installDir, "lib"), "libdir=$${exec_prefix}/lib", 1)
+	pc = strings.replace(pc, "includedir=" + filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
 	pkgconfig.use installDir
 	ctx.setMetadata pkgconfig.lookup("bzip3")!
 }
@@ -88,8 +98,5 @@ add_executable(consumer consumer.c)
 	tc.define "CMAKE_BUILD_RPATH", filepath.join(installDir, "lib")
 	tc.configure
 	tc.build
-	exec binary
-	if lastErr != nil {
-		panic lastErr
-	}
+	exec! binary
 }
