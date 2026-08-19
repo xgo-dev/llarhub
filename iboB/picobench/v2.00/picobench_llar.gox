@@ -19,8 +19,7 @@ onBuild ctx => {
 	patch := ctx.Proj.readFile("v2.00/install.patch")!
 	patchPath := filepath.join(ctx.SourceDir, "_llar_install.patch")
 	os.writeFile(patchPath, patch, 0o644)!
-	git "-C", ctx.SourceDir, "apply", "--unidiff-zero", patchPath
-	lastErr!
+	git! "-C", ctx.SourceDir, "apply", "--unidiff-zero", patchPath
 
 	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
 	// The selected Conan recipe sets this for pre-v2.06 tags whose declared
@@ -70,8 +69,6 @@ onTest ctx => {
 	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	exec "c++", "-std=c++11", "@"+flagsFile, consumer, "-o", binary
-	lastErr!
-	exec binary
-	lastErr!
+	exec! "c++", "-std=c++11", "@"+flagsFile, consumer, "-o", binary
+	exec! binary
 }
