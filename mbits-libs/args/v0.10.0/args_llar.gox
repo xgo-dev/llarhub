@@ -39,24 +39,29 @@ int main(int argc, char* argv[]) {
 }
 `
 
-const consumerCMakeLists = `cmake_minimum_required(VERSION 3.12)
-project(args_consumer LANGUAGES CXX)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-add_executable(args_consumer consumer.cpp)
-target_include_directories(args_consumer PRIVATE "INSTALL_DIR/include")
-target_link_directories(args_consumer PRIVATE "INSTALL_DIR/lib")
-target_link_libraries(args_consumer PRIVATE args)
-`
+var cmakeLists = `cmake_minimum_required(VERSION 3.12)
+project(args_llar LANGUAGES CXX)
 
-var sourcePatch = `diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 3d9271c..28c176f 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -12,3 +11,0 @@ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
--  include($${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
--  conan_basic_setup(TARGETS)
--
+set(LIBARGS_TESTING OFF CACHE BOOL "" FORCE)
+set(LIBARGS_INSTALL ON CACHE BOOL "" FORCE)
+set(ARGS_SOURCE_DIR "SOURCE_DIR")
+add_subdirectory("$${ARGS_SOURCE_DIR}" args)
+
+get_directory_property(ARGS_VERSION DIRECTORY "$${ARGS_SOURCE_DIR}" DEFINITION PROJECT_VERSION)
+set(ARGS_PC "$${CMAKE_CURRENT_BINARY_DIR}/args.pc")
+file(WRITE "$${CMAKE_CURRENT_BINARY_DIR}/args.pc.in" [=[prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: args
+Description: C++ argument parser library
+Version: @ARGS_VERSION@
+Libs: -L$${libdir} -largs
+Cflags: -I$${includedir}
+]=])
+configure_file("$${CMAKE_CURRENT_BINARY_DIR}/args.pc.in" "$${ARGS_PC}" @ONLY)
+install(FILES "$${ARGS_PC}" DESTINATION lib/pkgconfig)
 `
 
 id "mbits-libs/args"
@@ -65,44 +70,32 @@ fromVer "v0.10.0"
 
 onBuild ctx => {
 	installDir := ctx.outputDir
-	_, err := os.stat(filepath.join(ctx.SourceDir, "conanfile.txt"))
-	if err == nil {
-		patchFile := filepath.join(ctx.SourceDir, "_llar.patch")
-		os.writeFile(patchFile, []byte(sourcePatch), 0644)!
-		git "apply", "--unidiff-zero", patchFile
-		lastErr!
-	} else if !os.isNotExist(err) {
-		panic err
-	}
+	cmakeDir := filepath.join(ctx.SourceDir, "_llar_cmake")
+	os.mkdirAll(cmakeDir, 0755)!
+	os.writeFile(filepath.join(cmakeDir, "CMakeLists.txt"), []byte(strings.replace(cmakeLists, "SOURCE_DIR", ctx.SourceDir, -1)), 0644)!
 
-	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
-	c.defineBool "LIBARGS_TESTING", false
-	c.defineBool "LIBARGS_INSTALL", true
+	c := cmake.new(cmakeDir, filepath.join(cmakeDir, "_build"), installDir)
 	c.configure
 	c.build
 	c.install
 
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-largs",
-	}
-	ctx.setMetadata strings.join(flags, " ")
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("args")!
 }
 
 onTest ctx => {
 	installDir := ctx.outputDir
 	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
-	testBuild := filepath.join(testDir, "_build")
 
 	os.mkdirAll(testDir, 0755)!
-	os.writeFile(filepath.join(testDir, "consumer.cpp"), []byte(consumerSource), 0644)!
-	os.writeFile(filepath.join(testDir, "CMakeLists.txt"), []byte(strings.replace(consumerCMakeLists, "INSTALL_DIR", installDir, -1)), 0644)!
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(consumerSource), 0644)!
 
-	tc := cmake.new(testDir, testBuild, "")
-	tc.configure
-	tc.build
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "args.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("args")!), 0644)!
 
-	exec filepath.join(testBuild, "args_consumer"), "--sum", "1", "2", "3"
-	lastErr!
+	binary := filepath.join(testDir, "args_consumer")
+	exec! "c++", sourcePath, "-std=c++17", "-o", binary, "@"+flagsFile
+	exec! binary, "--sum", "1", "2", "3"
 }
