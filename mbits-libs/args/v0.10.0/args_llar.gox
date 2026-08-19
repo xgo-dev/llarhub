@@ -1,9 +1,11 @@
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 const consumerSource = `#include <args/parser.hpp>
+#include <algorithm>
 #include <cstdio>
 #include <numeric>
 #include <vector>
@@ -47,36 +49,60 @@ target_link_directories(args_consumer PRIVATE "INSTALL_DIR/lib")
 target_link_libraries(args_consumer PRIVATE args)
 `
 
+var sourcePatch = `diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3d9271c..28c176f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -12,3 +11,0 @@ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+-  include($${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)
+-  conan_basic_setup(TARGETS)
+-
+`
+
 id "mbits-libs/args"
 
 fromVer "v0.10.0"
 
 onBuild ctx => {
 	installDir := ctx.outputDir
+	_, err := os.stat(filepath.join(ctx.SourceDir, "conanfile.txt"))
+	if err == nil {
+		patchFile := filepath.join(ctx.SourceDir, "_llar.patch")
+		os.writeFile(patchFile, []byte(sourcePatch), 0644)!
+		git "apply", "--unidiff-zero", patchFile
+		lastErr!
+	} else if !os.isNotExist(err) {
+		panic err
+	}
 
-	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
 	c.defineBool "LIBARGS_TESTING", false
 	c.defineBool "LIBARGS_INSTALL", true
 	c.configure
 	c.build
 	c.install
 
-	ctx.setMetadata "-I"+installDir+"/include -L"+installDir+"/lib -largs"
+	flags := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-largs",
+	}
+	ctx.setMetadata strings.join(flags, " ")
 }
 
 onTest ctx => {
 	installDir := ctx.outputDir
-	testDir := ctx.SourceDir+"/_llar_consumer"
-	testBuild := testDir+"/_build"
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	testBuild := filepath.join(testDir, "_build")
 
 	os.mkdirAll(testDir, 0755)!
-	os.writeFile(testDir+"/consumer.cpp", []byte(consumerSource), 0644)!
-	os.writeFile(testDir+"/CMakeLists.txt", []byte(strings.replace(consumerCMakeLists, "INSTALL_DIR", installDir, -1)), 0644)!
+	os.writeFile(filepath.join(testDir, "consumer.cpp"), []byte(consumerSource), 0644)!
+	os.writeFile(filepath.join(testDir, "CMakeLists.txt"), []byte(strings.replace(consumerCMakeLists, "INSTALL_DIR", installDir, -1)), 0644)!
 
 	tc := cmake.new(testDir, testBuild, "")
 	tc.configure
 	tc.build
 
-	exec testBuild+"/args_consumer", "--sum", "1", "2", "3"
+	exec filepath.join(testBuild, "args_consumer"), "--sum", "1", "2", "3"
 	lastErr!
 }
