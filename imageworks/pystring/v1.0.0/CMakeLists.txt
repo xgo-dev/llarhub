@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
-project(pystring LANGUAGES CXX)
+set(PYSTRING_VERSION "1.0.0" CACHE STRING "Pystring version")
+project(pystring LANGUAGES CXX VERSION ${PYSTRING_VERSION})
 
 include(GNUInstallDirs)
 
@@ -12,3 +13,7 @@ install(TARGETS pystring
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 install(FILES ${PYSTRING_SRC_DIR}/pystring.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+configure_file(${PYSTRING_PC_IN} ${CMAKE_CURRENT_BINARY_DIR}/pystring.pc @ONLY)
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pystring.pc
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
