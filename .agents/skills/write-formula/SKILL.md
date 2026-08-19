@@ -7,7 +7,7 @@ description: Use when creating, migrating, reviewing, debugging, or validating L
 
 Treat a Formula as an XGo classfile that composes LLAR's Formula contract with
 the gsh execution surface. Write idiomatic XGo/gsh source, not Go code with a
-`.gox` suffix. Prefer the shortest verified XGo/gsh form that preserves the
+`.gox` suffix. Use the simplest verified XGo/gsh form that preserves the
 required semantics.
 
 ## Establish The Contract
@@ -44,7 +44,7 @@ documentation as a substitute for that source.
    consumer interface. Prefer the LLAR build-system helper matching upstream;
    use inherited gsh commands for verified steps the helper does not own.
 6. Perform an XGo style pass. Replace redundant setup, error checks, package
-   qualifiers, and temporary collections with the shorter verified XGo/gsh
+   qualifiers, and temporary collections with the simpler verified XGo/gsh
    form from the style reference.
 7. Compile through LLAR's actual ixgo path, then run the target repository's
    Formula validation for exact and representative versions, options, and

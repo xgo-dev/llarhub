@@ -35,7 +35,7 @@ rules below.
 
 ## XGo-First Formula Style
 
-Prefer the shortest verified XGo form whenever it expresses the same behavior
+Use the simplest verified XGo form whenever it expresses the same behavior
 directly:
 
 - Write callback values as lambdas.
