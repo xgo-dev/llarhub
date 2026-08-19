@@ -83,37 +83,41 @@ onBuild ctx => {
 		os.writeFile(filepath.join(licenseDir, name), license, 0o644)!
 	}
 
-	metadata := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lwhereami",
-	}
-	ctx.setMetadata strings.join(metadata, " ")
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: whereami
+Description: A drop-in two files library to locate the current executable and the current module on the file system
+Version: f15606a65908bb097e1887a08a40ae083e9a5c53
+Libs: -L$${libdir} -lwhereami
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "whereami.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("whereami")!
 }
 
 onTest ctx => {
 	installDir := ctx.outputDir
-	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	testDir := os.mkdirTemp("", "whereami-consumer-")!
+	defer os.removeAll(testDir)
 	testSource := filepath.join(testDir, "consumer.c")
-	testBuild := filepath.join(testDir, "_build")
-	binary := filepath.join(testBuild, "consumer")
-	os.mkdirAll(testDir, 0o755)!
+	binary := filepath.join(testDir, "consumer")
 	os.writeFile(testSource, []byte(consumerSource), 0o644)!
 
-	args := []string{
-		testSource,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lwhereami",
-		"-o", binary,
-	}
-	exec "cc", args...
-	lastErr!
+	pkgconfig.use installDir
+	args := []string{testSource}
+	args <- strings.fields(pkgconfig.lookup("whereami")!)...
+	args <- "-o", binary
+	cc! args...
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
