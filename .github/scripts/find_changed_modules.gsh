@@ -104,14 +104,12 @@ for module in changedModules {
 
 // TODO: When changed modules depend on each other, test only the leaf modules
 // in their dependency graph.
-modulesJSON := string(json.marshal(changedModules)!)
-hasModules := sprint(changedModules.len > 0)
+modulesJSON := json.marshal(changedModules)!
 
 outputFile := os.openFile($GITHUB_OUTPUT, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)!
 defer outputFile.close()
-fprintln! outputFile, "modules=${modulesJSON}"
-fprintln! outputFile, "has_modules=${hasModules}"
+fprintf! outputFile, "modules=%s\nhas_modules=%t\n", modulesJSON, changedModules.len > 0
 
 summaryFile := os.openFile($GITHUB_STEP_SUMMARY, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)!
 defer summaryFile.close()
-fprintln! summaryFile, "Changed modules: ${modulesJSON}"
+fprintf! summaryFile, "Changed modules: %s\n", modulesJSON
