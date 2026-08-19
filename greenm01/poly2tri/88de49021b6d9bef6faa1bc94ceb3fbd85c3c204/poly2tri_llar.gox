@@ -96,7 +96,10 @@ onTest ctx => {
 
 	pkgconfig.use installDir
 	args := []string{"-std=c++11", sourcePath}
-	args <- strings.fields(pkgconfig.lookup("poly2tri")!)...
+	// pkg-config escapes the `|` in LLAR option-cache paths; restore it before
+	// passing each complete lookup token to the compiler.
+	flags := pkgconfig.lookup("poly2tri")!
+	args <- strings.fields(strings.replaceAll(flags, `\|`, `|`))...
 	args <- "-o", binary
 	exec! "c++", args...
 
