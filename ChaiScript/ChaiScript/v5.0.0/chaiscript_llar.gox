@@ -1,0 +1,91 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <chaiscript/chaiscript.hpp>
+#include <iostream>
+#include <cassert>
+
+double chai_add(double i, double j)
+{
+  return i + j;
+}
+
+int main()
+{
+  chaiscript::ChaiScript chai({CHAI_MODULE_PATH});
+  chai.add(chaiscript::fun(&chai_add), "add");
+  const auto answer = chai.eval<double>("add(38.8, 3.2);");
+  assert(static_cast<int>(answer) == 42);
+  std::cout << "The answer is: " << answer << '\n';
+}
+`
+
+id "ChaiScript/ChaiScript"
+
+fromVer "v5.0.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	// The supported release line declares CMake 2.8; current CMake rejects
+	// that policy floor unless the minimum policy version is made explicit.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_SAMPLES", false
+	c.defineBool "BUILD_MODULES", true
+	c.defineBool "MULTITHREAD_SUPPORT_ENABLED", true
+	c.configure
+	c.build
+	c.install
+
+	// v5.0.0-v5.3.0 omit the standard-library module from install; newer
+	// releases install it under a versioned name. Copy the built module by its
+	// actual name so the runtime loader can find either contract.
+	stdlibPath := filepath.glob(filepath.join(ctx.SourceDir, "_build", "libchaiscript_stdlib*"))![0]
+	stdlib := os.readFile(stdlibPath)!
+	os.writeFile(filepath.join(installDir, "lib", "chaiscript", filepath.base(stdlibPath)), stdlib, 0o755)!
+
+	// Keep the license published by the Conan package.
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	license := os.readFile(filepath.join(ctx.SourceDir, "license.txt"))!
+	os.writeFile(filepath.join(licenseDir, "license.txt"), license, 0o644)!
+
+	// The upstream file embeds the build output path. Make it relocatable
+	// before using the installed pkg-config contract for Formula metadata.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "chaiscript.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix="+installDir, `prefix=$${pcfiledir}/../..`, 1)
+	pc = strings.replace(pc, "Libs: ", "Libs: -ldl -pthread", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("chaiscript")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	modulePath := "\"" + filepath.join(installDir, "lib", "chaiscript") + "/\""
+	source := strings.replace(consumerSource, "CHAI_MODULE_PATH", modulePath, 1)
+	os.writeFile(consumer, []byte(source), 0o644)!
+
+	// Resolve the complete installed cflags-and-libs query so this test checks
+	// the same metadata that downstream consumers receive, including on cache
+	// hits where onBuild is skipped.
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("chaiscript")!
+	flagsFile := filepath.join(testDir, "chaiscript.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
