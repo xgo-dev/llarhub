@@ -29,8 +29,8 @@ defaults {
 }
 
 filter => {
-	for _, name := range []string{"shared", "fPIC", "no_simd", "no_stdio"} {
-		for _, value := range target.options[name] {
+	for name in []string{"shared", "fPIC", "no_simd", "no_stdio"} {
+		for value in target.options[name] {
 			if value != "ON" && value != "OFF" {
 				return false
 			}
@@ -127,7 +127,7 @@ onTest ctx => {
 	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	exec "cc", "-std=c99", "@"+flagsFile, consumer, "-o", binary
+	cc "-std=c99", "@"+flagsFile, consumer, "-o", binary
 	lastErr!
 
 	os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
