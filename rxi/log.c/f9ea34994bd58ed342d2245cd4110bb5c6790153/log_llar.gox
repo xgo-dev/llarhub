@@ -2,7 +2,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 )
 
 var cmakeLists = `cmake_minimum_required(VERSION 3.8)
@@ -84,12 +83,22 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
 
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-llog.c",
-	}
-	ctx.setMetadata strings.join(flags, " ")
+	pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pkgconfigDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: log.c
+Description: A simple logging library implemented in C99
+Version: f9ea34994bd58ed342d2245cd4110bb5c6790153
+Cflags: -I$${includedir}
+Libs: -L$${libdir} -llog.c
+`
+	os.writeFile(filepath.join(pkgconfigDir, "log.c.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("log.c")!
 }
 
 onTest ctx => {
@@ -102,12 +111,13 @@ onTest ctx => {
 
 	shared := slices.contains(target.options["shared"], "ON")
 	binary := filepath.join(testDir, "consumer")
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "log.c.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("log.c")!), 0o644)!
 	args := []string{
 		sourcePath,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-llog.c",
 		"-o", binary,
+		"@" + flagsFile,
 	}
 	cc! args...
 
