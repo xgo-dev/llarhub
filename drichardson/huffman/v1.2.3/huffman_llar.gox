@@ -73,11 +73,26 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0644)!
 
-	metadata := "-lhuffman"
+	libs := "-L$${libdir} -lhuffman"
 	if slices.contains(target.require["os"], "windows") {
-		metadata += " -lws2_32"
+		libs += " -lws2_32"
 	}
-	ctx.setMetadata metadata
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: huffman
+Description: Huffman encoder and decoder library
+Version: 1.2.3
+Libs: ` + libs + `
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "huffman.pc"), []byte(pc), 0644)!
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("huffman")!
 }
 
 onTest ctx => {
@@ -89,18 +104,12 @@ onTest ctx => {
 	os.writeFile(sourcePath, []byte(consumerSource), 0644)!
 
 	binary := filepath.join(testDir, "consumer")
-	args := []string{
-		sourcePath,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lhuffman",
-		"-o", binary,
-	}
-	if slices.contains(target.require["os"], "windows") {
-		args = append(args, "-lws2_32")
-	}
-	exec "cc", args...
-	lastErr!
+	pkgconfig.use installDir
+	flags := strings.fields(pkgconfig.lookup("huffman")!)
+	args := []string{sourcePath}
+	args <- flags...
+	args <- "-o", binary
+	cc! args...
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
@@ -110,6 +119,5 @@ onTest ctx => {
 			os.setenv("PATH", filepath.join(installDir, "bin")+";"+path)!
 		}
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
