@@ -28,7 +28,7 @@ int main(int argc, char **argv) {
 
 id "orangeduck/tgc"
 
-fromVer "e193133e43af0862f51edfb9b518e212ea084412"
+fromVer "05354008dc0de09e0a076647b8a678aaebfa58e6"
 
 defaults {
 	"shared": "OFF",
@@ -52,7 +52,7 @@ filter => {
 onBuild ctx => {
 	installDir := ctx.outputDir
 
-	cmakeLists := ctx.Proj.readFile("e193133e43af0862f51edfb9b518e212ea084412/CMakeLists.txt")!
+	cmakeLists := ctx.Proj.readFile("05354008dc0de09e0a076647b8a678aaebfa58e6/CMakeLists.txt")!
 	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
 
 	shared := slices.contains(target.options["shared"], "ON")
@@ -85,7 +85,7 @@ libdir=$${prefix}/lib
 
 Name: tgc
 Description: Tiny garbage collector for C
-Version: e193133e43af0862f51edfb9b518e212ea084412
+Version: 0.1.0
 Cflags: -I$${includedir}
 Libs: -L$${libdir} -ltgc
 `
