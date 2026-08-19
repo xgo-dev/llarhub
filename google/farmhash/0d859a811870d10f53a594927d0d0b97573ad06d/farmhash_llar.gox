@@ -30,6 +30,8 @@ fromVer "0d859a811870d10f53a594927d0d0b97573ad06d"
 defaults {
 	"shared": "OFF",
 	"fPIC": "ON",
+	// OFF lets CMake probe for __builtin_expect; ON always defines the
+	// public FARMHASH_NO_BUILTIN_EXPECT consumer macro.
 	"no_builtin_expect": "OFF",
 }
 
@@ -70,12 +72,9 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
 
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lfarmhash",
-	}
-	ctx.setMetadata strings.join(flags, " ")
+	pkgconfig.use installDir
+	metadata := pkgconfig.lookup("farmhash")!
+	ctx.setMetadata metadata
 }
 
 onTest ctx => {
@@ -87,19 +86,26 @@ onTest ctx => {
 	os.writeFile(consumer, []byte(consumerSource), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		consumer,
-		"-L" + filepath.join(installDir, "lib"),
-		"-lfarmhash",
-		"-o", binary,
-	}
-	exec "c++", flags...
+
+	pkgconfig.use installDir
+	flags := strings.fields(pkgconfig.lookup("farmhash")!)
+	args := []string{consumer, "-o", binary}
+	args = append(args, flags...)
+	exec "c++", args...
 	lastErr!
 
 	if slices.contains(target.options["shared"], "ON") {
-		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		libDir := filepath.join(installDir, "lib")
+		ldPath := libDir
+		if current := os.getenv("LD_LIBRARY_PATH"); current != "" {
+			ldPath += ":" + current
+		}
+		dyldPath := libDir
+		if current := os.getenv("DYLD_LIBRARY_PATH"); current != "" {
+			dyldPath += ":" + current
+		}
+		exec! {"LD_LIBRARY_PATH": ldPath, "DYLD_LIBRARY_PATH": dyldPath}, binary
+		return
 	}
 	exec binary
 	lastErr!
