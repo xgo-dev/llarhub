@@ -126,7 +126,7 @@ onTest ctx => {
 	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	exec "cc", "@"+flagsFile, sourcePath, "-o", binary
+	exec "cc", sourcePath, "-o", binary, "@"+flagsFile
 	lastErr!
 
 	if shared {
