@@ -67,15 +67,40 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "lgpl.txt"), os.readFile(filepath.join(ctx.SourceDir, "lgpl.txt"))!, 0o644)!
 
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lCQRlib",
-	}
+	libs := []string{"-L$${libdir}", "-lCQRlib"}
 	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
-		flags = append(flags, "-lm")
+		libs <- "-lm"
 	}
-	ctx.setMetadata strings.join(flags, " ")
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	version := ""
+	makefile := string(os.readFile(filepath.join(ctx.SourceDir, "Makefile"))!)
+	for line in makefile.split("\n") {
+		parts := line.splitN("=", 2)
+		if parts.len == 2 && strings.trimSpace(parts[0]) == "RELEASE" {
+			version = strings.trimSpace(parts[1])
+			break
+		}
+	}
+	if version == "" {
+		panic "CQRlib Makefile has no RELEASE"
+	}
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: CQRlib
+Description: C quaternion rotation library
+Version: ` + version + `
+Libs: ` + strings.join(libs, " ") + `
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "cqrlib.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("cqrlib")!
 }
 
 onTest ctx => {
@@ -86,34 +111,20 @@ onTest ctx => {
 	cSource := filepath.join(testDir, "consumer.c")
 	os.writeFile(cSource, []byte(cConsumerSource), 0o644)!
 	cBinary := filepath.join(testDir, "consumer-c")
-	cArgs := []string{
-		cSource,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lCQRlib",
-	}
-	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
-		cArgs = append(cArgs, "-lm")
-	}
-	cArgs = append(cArgs, "-o", cBinary)
-	exec "cc", cArgs...
-	lastErr!
+	pkgconfig.use installDir
+	flags := strings.fields(pkgconfig.lookup("cqrlib")!)
+	cArgs := []string{cSource}
+	cArgs <- flags...
+	cArgs <- "-o", cBinary
+	cc! cArgs...
 
 	cppSource := filepath.join(testDir, "consumer.cpp")
 	os.writeFile(cppSource, []byte(cppConsumerSource), 0o644)!
 	cppBinary := filepath.join(testDir, "consumer-cpp")
-	cppArgs := []string{
-		cppSource,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lCQRlib",
-	}
-	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
-		cppArgs = append(cppArgs, "-lm")
-	}
-	cppArgs = append(cppArgs, "-o", cppBinary)
-	exec "c++", cppArgs...
-	lastErr!
+	cppArgs := []string{cppSource}
+	cppArgs <- flags...
+	cppArgs <- "-o", cppBinary
+	exec! "c++", cppArgs...
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
@@ -124,8 +135,6 @@ onTest ctx => {
 		}
 	}
 
-	exec cBinary
-	lastErr!
-	exec cppBinary
-	lastErr!
+	exec! cBinary
+	exec! cppBinary
 }
