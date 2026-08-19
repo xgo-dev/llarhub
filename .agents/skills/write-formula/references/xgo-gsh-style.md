@@ -82,9 +82,11 @@ directly:
 ### Collections And Control Flow
 
 - Use inferred list literals `[value1, value2]` and map literals
-  `{"key": value}` for non-empty collections. Give an empty collection an
-  explicit slice or map type, or use `make`, when later assignment or encoding
-  depends on its concrete element types.
+  `{"key": value}` for non-empty collections. Without an expected type, `[]`
+  is `[]any`; when an empty collection will be joined, assigned, passed to a
+  typed API, encoded, or mutated with domain values, always give it an
+  explicit type such as `[]string{}` or `map[string]bool{}`, or use `make`.
+  Use bare `[]` only when `[]any` is intentional.
 - Use list and map comprehensions for direct transforms and filters, for
   example `[f(value) for value in values if keep(value)]` and
   `{key(value): value for value in values}`. Keep side effects and multi-step
@@ -190,11 +192,13 @@ reimplementing parsers with shell text processing. XGo exposes common `fmt`
 operations as builtins; use `fprintf!`, `fprintln!`, `sprintf`, `errorf`, and
 related forms without importing or qualifying `fmt`.
 
-Imports remain explicit unless the resolved LLAR `gox.mod` registers an
-auto-import. In the pinned Formula contract, `cmake` and `autotools` are
-registered helpers; ordinary packages such as `os`, `strings`, `slices`, and
-`encoding/json` still require an import. Resolve this list against the active
-LLAR revision instead of assuming a helper is globally available.
+Imports remain explicit unless the active LLAR Formula project registration
+provides an auto-import. That registration is revision-specific and may be
+programmatic rather than a complete reflection of `gox.mod`; in the checked
+LLAR revision it exposes `cmake`, `autotools`, and `pkgconfig`. Ordinary
+packages such as `os`, `strings`, `slices`, and `encoding/json` still require an
+import. Resolve the actual registration against the target LLAR revision
+instead of assuming a helper is globally available.
 
 Use lowercase XGo aliases and auto-properties only for verified exported Go
 functions and zero-argument getters, such as `filepath.join`, `ctx.outputDir`,
