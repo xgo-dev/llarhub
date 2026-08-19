@@ -37,7 +37,11 @@ Read the complete declarations found by these searches. Establish:
 - the generated entry contract;
 - each top-level Formula method and callback signature;
 - promoted fields and methods available inside callbacks;
-- the ownership and error behavior of build and test context values.
+- the ownership and error behavior of source, build, and test context values.
+
+Also locate the Formula and comparator selection code. Confirm suffix matching,
+`fromVer` extraction and ordering, duplicate-threshold behavior, comparator
+discovery, and cache keys instead of inferring them from the directory layout.
 
 Do not infer an XGo surface from a generated Go name. Resolve lowercase aliases,
 auto-properties, overloads, and template receiver methods using the selected
@@ -92,6 +96,11 @@ Read the selected LLAR revision's `go.mod`. Record the exact versions of:
 - `github.com/goplus/gogen`;
 - `github.com/goplus/mod`;
 - the module providing `gsh.App`.
+
+Treat a Formula store's standalone XGo or gsh script toolchain separately. For
+example, llarhub may run a CI helper with `ixgo@latest` while compiling Formulas
+through the ixgo version pinned by LLAR. Acceptance by the first does not prove
+acceptance by the second.
 
 Read the matching module-cache source and documentation when a syntax or
 classfile rule matters. The Formula is compiled through LLAR's ixgo embedding
