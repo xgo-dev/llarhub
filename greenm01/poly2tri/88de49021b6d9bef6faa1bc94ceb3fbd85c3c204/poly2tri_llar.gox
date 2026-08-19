@@ -2,7 +2,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 )
 
 const consumerSource = `#include <poly2tri/poly2tri.h>
@@ -99,7 +98,7 @@ onTest ctx => {
 	// pkg-config escapes the `|` in LLAR option-cache paths; restore it before
 	// passing each complete lookup token to the compiler.
 	flags := pkgconfig.lookup("poly2tri")!
-	args <- strings.fields(strings.replaceAll(flags, `\|`, `|`))...
+	args <- flags.replaceAll(`\|`, `|`).fields...
 	args <- "-o", binary
 	exec! "c++", args...
 
