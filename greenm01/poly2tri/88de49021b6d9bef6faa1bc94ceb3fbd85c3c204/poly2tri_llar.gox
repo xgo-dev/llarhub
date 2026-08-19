@@ -49,7 +49,7 @@ onBuild ctx => {
 	shared := slices.contains(target.options["shared"], "ON")
 	fPIC := slices.contains(target.options["fPIC"], "ON")
 	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
-	c.define "POLY2TRI_SRC_DIR", ctx.SourceDir
+	c.define "POLY2TRI_SRC_DIR", filepath.join(ctx.SourceDir, "poly2tri")
 	c.define "CMAKE_INSTALL_LIBDIR", "lib"
 	c.defineBool "BUILD_SHARED_LIBS", shared
 	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
@@ -61,15 +61,27 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
 
-	metadata := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lpoly2tri",
-	}
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: poly2tri
+Description: 2D constrained Delaunay triangulation library
+Version: 88de49021b6d9bef6faa1bc94ceb3fbd85c3c204
+Libs: -L$${libdir} -lpoly2tri`
 	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
-		metadata <- "-lm"
+		pc += " -lm"
 	}
-	ctx.setMetadata strings.join(metadata, " ")
+	pc += `
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "poly2tri.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("poly2tri")!
 }
 
 onTest ctx => {
@@ -82,25 +94,15 @@ onTest ctx => {
 	os.mkdirAll(testBuild, 0o755)!
 	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
 
-	args := []string{
-		"-std=c++11",
-		"-I" + filepath.join(installDir, "include"),
-		sourcePath,
-		"-L" + filepath.join(installDir, "lib"),
-		"-lpoly2tri",
-	}
-	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
-		args <- "-lm"
-	}
-	args <- "-o"
-	args <- binary
-	exec "c++", args...
-	lastErr!
+	pkgconfig.use installDir
+	args := []string{"-std=c++11", sourcePath}
+	args <- strings.fields(pkgconfig.lookup("poly2tri")!)...
+	args <- "-o", binary
+	exec! "c++", args...
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
