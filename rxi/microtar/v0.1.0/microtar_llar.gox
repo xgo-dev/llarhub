@@ -2,7 +2,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 )
 
 const consumerSource = `#include <stdio.h>
@@ -74,12 +73,23 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
 
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lmicrotar",
-	}
-	ctx.setMetadata strings.join(flags, " ")
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${exec_prefix}/lib
+includedir=$${prefix}/include
+
+Name: microtar
+Description: A lightweight tar library written in ANSI C
+Version: 0.1.0
+Libs: -L$${libdir} -lmicrotar
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "microtar.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("microtar")!
 }
 
 onTest ctx => {
@@ -91,15 +101,11 @@ onTest ctx => {
 	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	args := []string{
-		sourcePath,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-lmicrotar",
-		"-o", binary,
-	}
-	exec "cc", args...
-	lastErr!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "microtar.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("microtar")!), 0o644)!
+	cc! sourcePath, "@"+flagsFile, "-o", binary
 
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
@@ -110,6 +116,5 @@ onTest ctx => {
 		}
 	}
 
-	exec binary
-	lastErr!
+	exec! binary
 }
