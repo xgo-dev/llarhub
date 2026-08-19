@@ -115,10 +115,14 @@ onBuild ctx => {
 	}
 
 	// CMake writes the upstream pkg-config file with the build prefix. Keep
-	// its verified flags while making the installed package relocatable.
+	// its verified flags while making the installed package relocatable and
+	// exposing the GPL extension's transitive core-library dependency.
 	pcPath := filepath.join(installDir, "lib", "pkgconfig", "atomic_ops.pc")
 	pc := string(os.readFile(pcPath)!)
 	pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+	pc = strings.replace(pc, "libdir="+filepath.join(installDir, "lib"), "libdir=$${prefix}/lib", 1)
+	pc = strings.replace(pc, "includedir="+filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+	pc = strings.replace(pc, "Libs: -L$${libdir} -latomic_ops", "Libs: -L$${libdir} -latomic_ops_gpl -latomic_ops", 1)
 	os.writeFile(pcPath, []byte(pc), 0o644)!
 
 	pkgconfig.use installDir
@@ -128,29 +132,21 @@ onBuild ctx => {
 onTest ctx => {
 	installDir := ctx.outputDir
 	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
-	testBuild := filepath.join(testDir, "_build")
 	os.mkdirAll(testDir, 0o755)!
-	os.writeFile(filepath.join(testDir, "consumer.c"), []byte(consumerSource), 0o644)!
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
 
-	cmakeLists := `cmake_minimum_required(VERSION 3.15)
-project(libatomic_ops_consumer C)
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("atomic_ops")!
+	flagsFile := filepath.join(testDir, "atomic_ops.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
-find_package(Atomic_ops CONFIG REQUIRED)
-
-add_executable(consumer consumer.c)
-target_link_libraries(consumer PRIVATE Atomic_ops::atomic_ops Atomic_ops::atomic_ops_gpl)
-`
-	os.writeFile(filepath.join(testDir, "CMakeLists.txt"), []byte(cmakeLists), 0o644)!
-
-	c := cmake.new(testDir, testBuild, "")
-	c.use installDir
-	c.configure
-	c.build
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c11", consumer, "-o", binary, "@"+flagsFile
 
 	if target.options["shared"][0] == "ON" {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
-	exec filepath.join(testBuild, "consumer")
-	lastErr!
+	exec! binary
 }
