@@ -68,19 +68,20 @@ onBuild ctx => {
 
 	pcDir := filepath.join(installDir, "lib", "pkgconfig")
 	os.mkdirAll(pcDir, 0o755)!
-	pcPrefix := "$" + "{pcfiledir}/../.."
-	prefixVar := "$" + "{prefix}"
-	libDirVar := "$" + "{libdir}"
-	includeDirVar := "$" + "{includedir}"
-	pc := "prefix=" + pcPrefix + "\n" +
-		"exec_prefix=" + prefixVar + "\n" +
-		"libdir=" + prefixVar + "/lib\n" +
-		"includedir=" + prefixVar + "/include\n\n" +
-		"Name: libipt\n" +
-		"Description: Intel Processor Trace library\n" +
-		"Version: " + version["set(PT_VERSION_MAJOR"] + "." + version["set(PT_VERSION_MINOR"] + "." + version["set(PT_VERSION_PATCH"] + "\n" +
-		"Libs: -L" + libDirVar + " -lipt\n" +
-		"Cflags: -I" + includeDirVar + "\n"
+	major := version["set(PT_VERSION_MAJOR"]
+	minor := version["set(PT_VERSION_MINOR"]
+	patch := version["set(PT_VERSION_PATCH"]
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: libipt
+Description: Intel Processor Trace library
+` + "Version: ${major}.${minor}.${patch}\n" + `
+Libs: -L$${libdir} -lipt
+Cflags: -I$${includedir}
+`
 	os.writeFile(filepath.join(pcDir, "libipt.pc"), []byte(pc), 0o644)!
 
 	pkgconfig.use installDir
