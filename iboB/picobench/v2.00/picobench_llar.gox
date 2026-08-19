@@ -46,7 +46,7 @@ includedir=$${prefix}/include
 Name: picobench
 Description: A micro microbenchmarking library in a single header file
 Version: ` + version + `
-Libs:
+Libs: -lpthread
 Cflags: -I$${includedir}
 `
 	os.writeFile(filepath.join(pcDir, "picobench.pc"), []byte(pc), 0o644)!
