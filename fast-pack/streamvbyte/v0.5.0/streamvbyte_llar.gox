@@ -38,7 +38,7 @@ defaults {
 }
 
 filter => {
-	for _, value in target.options["shared"] {
+	for value in target.options["shared"] {
 		if value != "ON" && value != "OFF" {
 			return false
 		}
@@ -50,26 +50,17 @@ onBuild ctx => {
 	installDir := ctx.outputDir
 	shared := slices.contains(target.options["shared"], "ON")
 
+	cmakeLists := string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!)
 	// Older tags explicitly disable macOS RPATH. Restore the relocatable
 	// setting when the shared option requires that installed library.
-	if shared {
-		content := string(ctx.Proj.readFile("CMakeLists.txt")!)
-		if strings.contains(content, "set(CMAKE_MACOSX_RPATH OFF)") {
-			patchPath := filepath.join(ctx.SourceDir, "_llar_macos_rpath.patch")
-			patchText := `--- CMakeLists.txt
-+++ CMakeLists.txt
-@@ -1,1 +1,1 @@
--set(CMAKE_MACOSX_RPATH OFF)
-+set(CMAKE_MACOSX_RPATH ON)
-`
-			os.writeFile(patchPath, []byte(patchText), 0o644)!
-			patch "--batch", "--forward", "-i", patchPath
-			lastErr!
-		}
+	if shared && strings.contains(cmakeLists, "set(CMAKE_MACOSX_RPATH OFF)") {
+		cmakeLists = strings.replace(cmakeLists, "set(CMAKE_MACOSX_RPATH OFF)", "set(CMAKE_MACOSX_RPATH ON)", 1)
+		os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), []byte(cmakeLists), 0o644)!
 	}
 
 	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
 	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
 	c.defineBool "BUILD_SHARED_LIBS", shared
 	c.configure
 	c.build
@@ -86,12 +77,37 @@ onBuild ctx => {
 			panic err
 		}
 	}
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-l" + library,
+
+	version := ""
+	for line in cmakeLists.split("\n") {
+		if strings.contains(line, "project(STREAMVBYTE VERSION") {
+			parts := strings.split(line, "\"")
+			if parts.len >= 2 {
+				version = parts[1]
+			}
+			break
+		}
 	}
-	ctx.setMetadata strings.join(flags, " ")
+	if version == "" {
+		panic "streamvbyte CMakeLists.txt has no project version"
+	}
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: streamvbyte
+Description: Fast integer compression in C using the StreamVByte codec
+Version: ` + version + `
+Libs: -L$${libdir} -l` + library + `
+Cflags: -I$${includedir}
+`
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	os.writeFile(filepath.join(pcDir, "streamvbyte.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("streamvbyte")!
 }
 
 onTest ctx => {
@@ -103,26 +119,14 @@ onTest ctx => {
 	os.writeFile(sourcePath, []byte(consumerProgram), 0o644)!
 
 	shared := slices.contains(target.options["shared"], "ON")
-	// Keep the cache-hit consumer aligned with the installed archive name.
-	library := "streamvbyte"
-	if !shared {
-		_, err := os.stat(filepath.join(installDir, "lib", "libstreamvbyte.a"))
-		if os.isNotExist(err) {
-			library = "streamvbyte_static"
-		} else if err != nil {
-			panic err
-		}
-	}
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("streamvbyte")!
+	flagsFile := filepath.join(testDir, "streamvbyte.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	args := []string{
-		sourcePath,
-		"-o", binary,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-l" + library,
-	}
-	exec "cc", args...
+	exec "cc", "@"+flagsFile, sourcePath, "-o", binary
 	lastErr!
 
 	if shared {
