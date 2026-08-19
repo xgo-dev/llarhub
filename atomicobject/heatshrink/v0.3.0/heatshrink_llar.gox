@@ -90,7 +90,7 @@ onBuild ctx => {
 			break
 		}
 	}
-pc := `prefix=$${pcfiledir}/../..
+	pc := `prefix=$${pcfiledir}/../..
 exec_prefix=$${prefix}
 libdir=$${prefix}/lib
 includedir=$${prefix}/include
@@ -124,11 +124,9 @@ onTest ctx => {
 	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
-	exec "cc", "-std=c99", consumer, "@"+flagsFile, "-o", binary
-	lastErr!
+	cc! "-std=c99", consumer, "@"+flagsFile, "-o", binary
 
 	os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-	exec binary
-	lastErr!
+	exec! binary
 }
