@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const cmakeLists = `cmake_minimum_required(VERSION 3.12)
+var cmakeLists = `cmake_minimum_required(VERSION 3.12)
 project(iqa C)
 
 if(MSVC AND BUILD_SHARED_LIBS)
@@ -27,11 +27,11 @@ install(TARGETS iqa
 install(FILES $${IQA_HEADERS} DESTINATION $${CMAKE_INSTALL_INCLUDEDIR})
 `
 
-const consumerSource = `#include "math_utils.h"
+const consumerSource = `#include "iqa.h"
 
 int main(void) {
-    _max(0, 1);
-    return 0;
+    const unsigned char image[1] = {0};
+    return iqa_mse(image, image, 1, 1, 1) != 0.0f;
 }
 `
 
@@ -90,15 +90,27 @@ onBuild ctx => {
 	if osValues.len > 0 {
 		osName = osValues[0]
 	}
-	flags := []string{
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-liqa",
+	libs := "-L$${libdir} -liqa"
+	if osName == "linux" || osName == "freebsd" {
+		libs += " -lm"
 	}
-	if osName == "linux" {
-		flags <- "-lm"
-	}
-	ctx.setMetadata strings.join(flags, " ")
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: iqa
+Description: Image quality assessment library
+Version: 0559a8ff2acd9746864975834d35be6892cc9801
+Libs: ` + libs + `
+Cflags: -I$${includedir}
+`
+	pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pkgconfigDir, 0o755)!
+	os.writeFile(filepath.join(pkgconfigDir, "iqa.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("iqa")!
 }
 
 onTest ctx => {
@@ -109,35 +121,29 @@ onTest ctx => {
 	consumer := filepath.join(testDir, "consumer.c")
 	os.writeFile(consumer, []byte(consumerSource), 0o644)!
 
-	osName := runtime.GOOS
-	osValues := target.require["os"]
-	if osValues.len > 0 {
-		osName = osValues[0]
-	}
+	pkgconfig.use installDir
+	flags := [strings.replace(flag, `\|`, "|", -1) for flag in strings.fields(pkgconfig.lookup("iqa")!)]
+	args := []string{consumer}
+	args <- flags...
 	shared := slices.contains(target.options["shared"], "ON")
 	binary := filepath.join(testDir, "consumer")
-	args := []string{
-		consumer,
-		"-I" + filepath.join(installDir, "include"),
-		"-L" + filepath.join(installDir, "lib"),
-		"-liqa",
-	}
-	if osName == "linux" {
-		args <- "-lm"
-	}
 	args <- "-o", binary
-	exec "cc", args...
-	lastErr!
+	cc! args...
 
 	if shared {
+		osName := runtime.GOOS
+		osValues := target.require["os"]
+		if osValues.len > 0 {
+			osName = osValues[0]
+		}
 		if osName == "windows" {
 			path := os.getenv("PATH")
 			os.setenv("PATH", filepath.join(installDir, "bin")+";"+path)!
+		} else if osName == "darwin" {
+			os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		} else {
 			os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-			os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		}
 	}
-	exec binary
-	lastErr!
+	exec! binary
 }
