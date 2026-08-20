@@ -1,0 +1,139 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const cmakeLists = `cmake_minimum_required(VERSION 3.15)
+project(tiny-bignum-c LANGUAGES C)
+
+add_library(tiny-bignum-c $${TINY_BIGNUM_C_SRC_DIR}/bn.c)
+set_target_properties(tiny-bignum-c PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+
+include(GNUInstallDirs)
+install(TARGETS tiny-bignum-c
+        RUNTIME DESTINATION $${CMAKE_INSTALL_BINDIR}
+        LIBRARY DESTINATION $${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION $${CMAKE_INSTALL_LIBDIR})
+
+install(FILES $${TINY_BIGNUM_C_SRC_DIR}/bn.h DESTINATION $${CMAKE_INSTALL_INCLUDEDIR})
+`
+
+const consumerSource = `#include <bn.h>
+
+#include <stdio.h>
+
+void factorial(struct bn* n, struct bn* res) {
+    struct bn tmp;
+
+    bignum_assign(&tmp, n);
+    bignum_dec(n);
+
+    while (!bignum_is_zero(n)) {
+        bignum_mul(&tmp, n, res);
+        bignum_dec(n);
+        bignum_assign(&tmp, res);
+    }
+
+    bignum_assign(res, &tmp);
+}
+
+int main(void) {
+    struct bn num;
+    struct bn result;
+    char buf[8192];
+
+    bignum_from_int(&num, 100);
+    factorial(&num, &result);
+    bignum_to_string(&result, buf, sizeof(buf));
+    printf("factorial(100) using bignum = %s\\n", buf);
+
+    return 0;
+}
+`
+
+id "kokke/tiny-bignum-c"
+
+fromVer "cb8b53925ae79e5fb8f6a2f21b371fb2c3c8e7ec"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	cmakeDir := filepath.join(ctx.SourceDir, "_llar_cmake")
+	os.mkdirAll(cmakeDir, 0o755)!
+	os.writeFile(filepath.join(cmakeDir, "CMakeLists.txt"), []byte(cmakeLists), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	c := cmake.new(cmakeDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "TINY_BIGNUM_C_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pkgconfigDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: tiny-bignum-c
+Description: Small multiple-precision integer implementation in C
+Version: cb8b53925ae79e5fb8f6a2f21b371fb2c3c8e7ec
+Cflags: -I$${includedir}
+Libs: -L$${libdir} -ltiny-bignum-c
+`
+	os.writeFile(filepath.join(pkgconfigDir, "tiny-bignum-c.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("tiny-bignum-c")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	binary := filepath.join(testDir, "consumer")
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "tiny-bignum-c.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("tiny-bignum-c")!), 0o644)!
+	cc! consumer, "-o", binary, "@" + flagsFile
+
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
