@@ -1,0 +1,91 @@
+import (
+	"os"
+	"strings"
+)
+
+id "json-c/json-c"
+
+fromVer "json-c-0.17-20230812"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+
+	// Keep a standard lib/ layout so the installed pkg-config file and the
+	// dependency search paths resolve without lib64 handling.
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	// Build the static archive with position-independent code, matching the
+	// Conan recipe defaults (shared=False, fPIC=True). json-c builds its
+	// shared and static libraries from independent targets, so select the
+	// static one and leave DISABLE_STATIC_FPIC off to keep -fPIC.
+	c.defineBool "BUILD_SHARED_LIBS", false
+	c.defineBool "BUILD_STATIC_LIBS", true
+	c.defineBool "DISABLE_STATIC_FPIC", false
+	// Library-only install: skip the upstream test suite and CLI apps.
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_APPS", false
+
+	c.configure
+	c.build
+	c.install
+
+	// Derive consumer flags from the installed pkg-config file. The static
+	// query also reports json-c's private math dependency (-lm on UNIX),
+	// which a static consumer must link.
+	c.use installDir
+	capout => {
+		exec "pkg-config", "--cflags", "--libs", "--static", "json-c"
+	}
+	if lastErr != nil {
+		panic lastErr
+	}
+	ctx.setMetadata strings.trimSpace(output)
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Build the consumer in a tree independent of the onBuild scratch tree so
+	// the test also runs on a cache hit, where onBuild is skipped.
+	testDir := ctx.SourceDir + "/_llar_consumer"
+	testBuild := testDir + "/_build"
+
+	// The consumer mirrors the Conan test_package: include <json-c/json.h>,
+	// link against json-c via its installed CMake package, then build a small
+	// JSON object to confirm the installed headers and library are usable.
+	source := `#include <json-c/json.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    json_object *jobj = json_object_new_object();
+    json_object *jarray = json_object_new_array();
+    json_object_array_add(jarray, json_object_new_string("c"));
+    json_object_array_add(jarray, json_object_new_string("c++"));
+    json_object_object_add(jobj, "Categories", jarray);
+    printf("%s\n", json_object_to_json_string(jobj));
+    json_object_put(jobj);
+    return EXIT_SUCCESS;
+}
+`
+	os.mkdirAll(testDir, 0755)!
+	os.writeFile(testDir+"/consumer.c", []byte(source), 0644)!
+
+	cmakeLists := `cmake_minimum_required(VERSION 3.15)
+project(json_c_consumer LANGUAGES C)
+find_package(json-c REQUIRED CONFIG)
+add_executable(consumer consumer.c)
+target_link_libraries(consumer PRIVATE json-c::json-c)
+`
+	os.writeFile(testDir+"/CMakeLists.txt", []byte(cmakeLists), 0644)!
+
+	tc := cmake.new(testDir, testBuild, "")
+	tc.use installDir
+	tc.configure
+	tc.build
+
+	exec testBuild + "/consumer"
+	if lastErr != nil {
+		panic lastErr
+	}
+}

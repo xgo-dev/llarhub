@@ -1,6 +1,5 @@
 import (
 	"encoding/json"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -45,21 +44,18 @@ refName := $REF_NAME
 
 var diffBase string
 if eventName == "pull_request" {
-	capout => { git "merge-base", baseSHA, headSHA }
-	lastErr!
+	capout => { git! "merge-base", baseSHA, headSHA }
 	diffBase = output.trimSpace
 } else if refName == defaultBranch {
 	diffBase = baseSHA
 } else {
-	capout => { git "merge-base", "origin/"+defaultBranch, headSHA }
-	lastErr!
+	capout => { git! "merge-base", "origin/"+defaultBranch, headSHA }
 	diffBase = output.trimSpace
 }
 
 capout => {
-	git "diff", "--name-only", "--diff-filter=ACDMRT", "-z", diffBase, headSHA
+	git! "diff", "--name-only", "--diff-filter=ACDMRT", "-z", diffBase, headSHA
 }
-lastErr!
 
 var modules map[string]bool = {}
 var formulaDirs map[string]map[string]bool = {}
@@ -76,7 +72,7 @@ for changedPath in output.split("\x00") {
 		}
 		has := hasFormula(module)!
 		if has {
-			panic fmt.Sprintf("module %s is missing versions.json", module)
+			panic "module ${module} is missing versions.json"
 		}
 		continue
 	}
@@ -93,8 +89,7 @@ for changedPath in output.split("\x00") {
 	}
 }
 
-changedModules := []string([])
-changedModules <- [module for module, _ in modules]...
+changedModules := [module for module, _ in modules]
 sort.strings changedModules
 
 for module in changedModules {
@@ -102,7 +97,8 @@ for module in changedModules {
 	if len(dirs) > 1 {
 		changedDirs := [dir for dir, _ in dirs]
 		sort.strings changedDirs
-		panic fmt.Sprintf("module %s changes multiple Formula directories: %s; llar test cannot validate multiple fromVer ranges yet", module, changedDirs.join(", "))
+		changedDirsText := changedDirs.join(", ")
+		panic "module ${module} changes multiple Formula directories: ${changedDirsText}; llar test cannot validate multiple fromVer ranges yet"
 	}
 }
 
@@ -112,8 +108,8 @@ modulesJSON := json.marshal(changedModules)!
 
 outputFile := os.openFile($GITHUB_OUTPUT, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)!
 defer outputFile.close()
-fmt.fprintf! outputFile, "modules=%s\nhas_modules=%t\n", modulesJSON, changedModules.len > 0
+fprintf! outputFile, "modules=%s\nhas_modules=%t\n", modulesJSON, changedModules.len > 0
 
 summaryFile := os.openFile($GITHUB_STEP_SUMMARY, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)!
 defer summaryFile.close()
-fmt.fprintf! summaryFile, "Changed modules: %s\n", modulesJSON
+fprintf! summaryFile, "Changed modules: %s\n", modulesJSON

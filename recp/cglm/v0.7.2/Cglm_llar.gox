@@ -1,0 +1,133 @@
+import (
+	"path/filepath"
+	"os"
+	"slices"
+	"strings"
+)
+
+const consumerProgram = `#include <cglm/cglm.h>
+#include <stdio.h>
+
+int main(void) {
+	mat4 matrix = {
+		{1.0f, 0.0f, 0.0f, 0.0f},
+		{0.0f, 1.0f, 0.0f, 0.0f},
+		{0.0f, 0.0f, 1.0f, 0.0f},
+		{0.0f, 0.0f, 0.0f, 1.0f},
+	};
+	vec4 vector = {1.0f, 2.0f, 3.0f, 1.0f};
+	vec4 result;
+
+	float det = glm_mat4_det(matrix);
+	glm_mat4_mulv(matrix, vector, result);
+
+	printf("det=%f\n", det);
+	printf("result=%f %f %f %f\n",
+		result[0], result[1], result[2], result[3]);
+	return 0;
+}
+`
+
+id "recp/cglm"
+
+fromVer "v0.7.2"
+
+// cglm is an optimized C99 math library. Its CMake build produces a single
+// `cglm` library from `src/` and installs public headers under `include/cglm`.
+// This build contract (the CGLM_SHARED/CGLM_STATIC/CGLM_USE_TEST options, the
+// `cglm` library installed under `lib`, and headers under `include/cglm`) is
+// stable from v0.7.2 — the first tag with a CMakeLists — onward.
+//
+// A `cglm.pc` pkg-config file is only installed from v0.8.2; v0.7.2..v0.8.1
+// ship the same build and install layout but no `.pc`, so the metadata step
+// falls back to hand-built flags for that range.
+//
+// Options mirror the meaningful choices of the Conan Center recipe:
+//   - shared: build the shared library (ON) instead of the static one (OFF).
+// The upstream CMake option CGLM_USE_TEST is always disabled; it builds the
+// upstream test suite, not the installed interface.
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	for _, value := range target.options["shared"] {
+		if value != "ON" && value != "OFF" {
+			return false
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c.defineBool "CGLM_SHARED", shared
+	c.defineBool "CGLM_STATIC", !shared
+	c.defineBool "CGLM_USE_TEST", false
+	c.configure
+	c.build
+	c.install
+
+	// Prefer the installed pkg-config file so metadata stays synchronized with
+	// the actual build (e.g. -lm on Linux/FreeBSD). v0.8.2+ install `cglm.pc`;
+	// v0.7.2..v0.8.1 do not, so fall back to hand-built flags derived from the
+	// install layout when pkg-config cannot resolve cglm.
+	c.use installDir
+	capout => {
+		exec "pkg-config", "--cflags", "--libs", "cglm"
+	}
+	if lastErr == nil {
+		ctx.setMetadata strings.trimSpace(output)
+		return
+	}
+
+	// No usable `cglm.pc`: the CMake install still produces libcglm under
+	// <installDir>/lib and headers under <installDir>/include, matching the
+	// consumer flags the test uses.
+	flags := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lcglm", "-lm",
+	}
+	ctx.setMetadata strings.join(flags, " ")
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testBuild := ctx.SourceDir + "/_consumer_build"
+	if err := os.mkdirAll(testBuild, 0o755); err != nil {
+		panic err
+	}
+
+	// Consumer program mirrors the Conan test_package: include <cglm/cglm.h>,
+	// compute a determinant and a matrix-vector product.
+	testSource := filepath.join(testBuild, "consumer.c")
+	if err := os.writeFile(testSource, []byte(consumerProgram), 0o644); err != nil {
+		panic err
+	}
+
+	// Derive consumer flags from the installed output, not from ctx.Out
+	// metadata: on a cache hit onBuild is skipped and the build result is
+	// empty, but the install directory is still populated.
+	flags := []string{
+		"-I" + filepath.join(installDir, "include"),
+		"-L" + filepath.join(installDir, "lib"),
+		"-lcglm", "-lm",
+	}
+
+	binary := filepath.join(testBuild, "consumer")
+	args := []string{testSource, "-o", binary}
+	args = append(args, flags...)
+	exec "cc", args...
+	if lastErr != nil {
+		panic lastErr
+	}
+
+	exec binary
+	if lastErr != nil {
+		panic lastErr
+	}
+}

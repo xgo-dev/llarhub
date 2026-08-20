@@ -1,0 +1,136 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerProgram = `#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+
+#include "streamvbyte.h"
+
+int main(void) {
+	uint32_t N = 100U;
+	uint32_t * datain = malloc(N * sizeof(uint32_t));
+	uint8_t * compressedbuffer = malloc(streamvbyte_max_compressedbytes(N));
+	uint32_t * recovdata = malloc(N * sizeof(uint32_t));
+	for (uint32_t k = 0; k < N; ++k)
+		datain[k] = 120;
+	size_t compsize = streamvbyte_encode(datain, N, compressedbuffer);
+	size_t compsize2 = streamvbyte_decode(compressedbuffer, recovdata, N);
+	assert(compsize == compsize2);
+	free(datain);
+	free(compressedbuffer);
+	free(recovdata);
+	printf("Compressed %d integers down to %d bytes.\n", N, (int) compsize);
+	return 0;
+}
+`
+
+id "fast-pack/streamvbyte"
+
+fromVer "v0.5.0"
+
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	for value in target.options["shared"] {
+		if value != "ON" && value != "OFF" {
+			return false
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+
+	cmakeLists := string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!)
+	// Older tags explicitly disable macOS RPATH. Restore the relocatable
+	// setting when the shared option requires that installed library.
+	if shared && strings.contains(cmakeLists, "set(CMAKE_MACOSX_RPATH OFF)") {
+		cmakeLists = strings.replace(cmakeLists, "set(CMAKE_MACOSX_RPATH OFF)", "set(CMAKE_MACOSX_RPATH ON)", 1)
+		os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), []byte(cmakeLists), 0o644)!
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.configure
+	c.build
+	c.install
+
+	// v0.5.0-v0.5.2 install the static target as
+	// libstreamvbyte_static.a; v0.5.3 and newer name it libstreamvbyte.a.
+	library := "streamvbyte"
+	if !shared {
+		_, err := os.stat(filepath.join(installDir, "lib", "libstreamvbyte.a"))
+		if os.isNotExist(err) {
+			library = "streamvbyte_static"
+		} else if err != nil {
+			panic err
+		}
+	}
+
+	version := ""
+	for line in cmakeLists.split("\n") {
+		if strings.contains(line, "project(STREAMVBYTE VERSION") {
+			parts := strings.split(line, "\"")
+			if parts.len >= 2 {
+				version = parts[1]
+			}
+			break
+		}
+	}
+	if version == "" {
+		panic "streamvbyte CMakeLists.txt has no project version"
+	}
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: streamvbyte
+Description: Fast integer compression in C using the StreamVByte codec
+Version: ` + version + `
+Libs: -L$${libdir} -l` + library + `
+Cflags: -I$${includedir}
+`
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	os.writeFile(filepath.join(pcDir, "streamvbyte.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("streamvbyte")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerProgram), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("streamvbyte")!
+	flagsFile := filepath.join(testDir, "streamvbyte.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
