@@ -1,0 +1,18 @@
+import "strings"
+
+// Tags mix libdnet-X.Y.Z, GNU DNET_* names, and one ancient snapshot.
+// GNU comparison would order those families by spelling, so map libdnet-*
+// to that semver and keep DNET_* plus other tags below libdnet-1.0.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "libdnet-") {
+		return "v" + strings.trimPrefix(version, "libdnet-")
+	}
+	if strings.hasPrefix(version, "DNET_") {
+		return "v0." + strings.replaceAll(strings.trimPrefix(version, "DNET_"), "_", ".")
+	}
+	return "v0.0.0-" + strings.replaceAll(version, "_", ".")
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
