@@ -1,5 +1,0 @@
-compareVer (a, b) => {
-	// utf8proc tags releases as semver with a leading "v" (e.g. v2.9.0),
-	// so compare with semver semantics rather than dpkg ordering.
-	return semver.compare(a.Version, b.Version)
-}

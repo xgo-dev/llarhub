@@ -1,16 +1,17 @@
 import "os"
+import "path/filepath"
 import "strings"
 
 id "JuliaStrings/utf8proc"
 
-fromVer "v2.9.0"
+fromVer "v2.7.0"
 
 onBuild ctx => {
 	installDir := ctx.outputDir
 
-	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
 	c.buildType "Release"
-	// utf8proc v2.9.0 declares cmake_minimum_required(VERSION 3.0.0); the Conan
+	// utf8proc v2.7.0 declares cmake_minimum_required(VERSION 3.0.0); the Conan
 	// recipe injects the same policy floor for pre-2.10.0 releases so the
 	// project keeps configuring under CMake 4.
 	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
@@ -29,18 +30,17 @@ onBuild ctx => {
 	c.build
 	c.install
 
-	// Derive the consumer interface from the pkg-config file utf8proc installs
-	// (libutf8proc.pc) rather than guessing flags.
-	c.use installDir
-	capout => {
-		exec "pkg-config", "--libs", "--cflags", "libutf8proc"
-	}
-	meta := strings.trimSpace(output)
-	// A consumer of the static build must define UTF8PROC_STATIC so the header
-	// does not mark symbols dllimport on Windows; harmless elsewhere. Mirrors
-	// the Conan package_info static branch.
-	meta = strings.trimSpace(meta + " -DUTF8PROC_STATIC")
-	ctx.setMetadata meta
+	// CMake writes absolute paths and its upstream Cflags use the build-only
+	// export define. Keep the installed pkg-config contract relocatable and
+	// expose the static consumer define from the actual build mode.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "libutf8proc.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replaceAll(pc, installDir, `$${pcfiledir}/../..`)
+	pc = strings.replace(pc, "-DUTF8PROC_EXPORTS", "-DUTF8PROC_STATIC", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libutf8proc")!
 }
 
 onTest ctx => {
@@ -48,13 +48,12 @@ onTest ctx => {
 
 	// Build the consumer in a tree independent of the onBuild scratch dir so
 	// onTest behaves identically on a cache hit (where _build does not exist).
-	testDir := ctx.SourceDir + "/_llartest"
-	os.removeAll(testDir)
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
 	os.mkdirAll(testDir, 0o755)!
 
 	// Consumer modelled on the Conan test_package: print the library and
 	// Unicode versions through the installed public headers/library.
-	src := testDir + "/consumer.c"
+	src := filepath.join(testDir, "consumer.c")
 	os.writeFile(src, []byte(`#include <stdio.h>
 #include "utf8proc.h"
 
@@ -65,20 +64,14 @@ int main(void) {
 }
 `), 0o644)!
 
-	bin := testDir + "/consumer"
-	// Compile and link against the installed artifact using its own pkg-config
-	// entry so include/lib paths and flags come from the real installation.
-	// Paths are single-quoted because a matrix suffix can contain a "|".
-	build := "cc '" + src + "' -o '" + bin + "'" +
-		" -I'" + installDir + "/include' -DUTF8PROC_STATIC" +
-		" $(PKG_CONFIG_PATH='" + installDir + "/lib/pkgconfig' pkg-config --cflags --libs libutf8proc)"
-	exec "sh", "-c", build
-	if lastErr != nil {
-		panic lastErr
-	}
+	bin := filepath.join(testDir, "consumer")
+	// Compile and link with the complete installed pkg-config lookup so this
+	// checks the same metadata consumers receive, including on cache hits.
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("libutf8proc")!
+	flagsFile := filepath.join(testDir, "utf8proc.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
 
-	exec "sh", "-c", "'" + bin + "'"
-	if lastErr != nil {
-		panic lastErr
-	}
+	cc! src, "-o", bin, "@"+flagsFile
+	exec! bin
 }
