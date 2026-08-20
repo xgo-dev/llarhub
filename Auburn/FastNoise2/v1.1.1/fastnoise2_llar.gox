@@ -1,0 +1,134 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include "FastNoise/FastNoise.h"
+
+int main() {
+    auto gen = FastNoise::New<FastNoise::Simplex>();
+    if (!gen) {
+        return 1;
+    }
+    (void)gen->GenSingle2D(0.5f, 0.5f, 1337);
+    return 0;
+}
+`
+
+id "Auburn/FastNoise2"
+
+fromVer "v1.1.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_CXX_STANDARD", "17"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "FASTNOISE2_TOOLS", false
+	c.defineBool "FASTNOISE2_TESTS", false
+	c.defineBool "FASTNOISE2_UTILITY", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+		if line.hasPrefix("project(FastNoise2 VERSION ") {
+			version = line.trimPrefix("project(FastNoise2 VERSION ").split(")")[0]
+			break
+		}
+	}
+	if version == "" {
+		panic "FastNoise2 CMakeLists.txt has no project version"
+	}
+
+	libName := "FastNoise"
+	for entry in os.readDir(filepath.join(installDir, "lib"))! {
+		if entry.isDir {
+			continue
+		}
+		name := entry.name
+		if name.hasPrefix("libFastNoiseD.") || name.hasPrefix("FastNoiseD.") {
+			libName = "FastNoiseD"
+			break
+		}
+	}
+
+	cflags := "-I$${includedir}"
+	if !shared {
+		cflags += " -DFASTNOISE_STATIC_LIB"
+	}
+	libs := "-L$${libdir} -l" + libName
+	if slices.contains(target.require["os"], "linux") {
+		libs += " -lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: FastNoise2
+Description: Modular node graph based noise generation library using SIMD, C++17 and templates
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "FastNoise2.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("FastNoise2")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "FastNoise2.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("FastNoise2")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
