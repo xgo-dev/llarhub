@@ -1,0 +1,158 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <cstdlib>
+#include <juice/juice.h>
+
+int main(void) {
+    juice_config config;
+    juice_set_log_level(JUICE_LOG_LEVEL_WARN);
+    return EXIT_SUCCESS;
+}
+`
+
+id "paullouisageneau/libjuice"
+
+fromVer "v1.5.7"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "NO_TESTS", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pcName := ""
+	for name in ["libjuice.pc", "juice.pc"] {
+		path := filepath.join(pcDir, name)
+		_, err := os.stat(path)
+		if err == nil {
+			pc := string(os.readFile(path)!)
+			pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+			os.writeFile(path, []byte(pc), 0o644)!
+			pcName = name.trimSuffix(".pc")
+			break
+		} else if !os.isNotExist(err) {
+			panic err
+		}
+	}
+	if pcName == "" {
+		version := ""
+		for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+			trimmed := line.trimSpace()
+			if trimmed.hasPrefix("VERSION ") {
+				version = trimmed.trimPrefix("VERSION ").trimSpace()
+				break
+			}
+		}
+		if version == "" {
+			panic "libjuice CMakeLists.txt has no project version"
+		}
+
+		libs := ["-L$${libdir}", "-ljuice"]
+		cflags := ["-I$${includedir}"]
+		if !shared {
+			cflags <- "-DJUICE_STATIC"
+		}
+		osName := ""
+		osValues := target.require["os"]
+		if osValues.len > 0 {
+			osName = osValues[0]
+		}
+		if osName == "linux" || osName == "freebsd" {
+			libs <- ["-lm", "-lpthread", "-ldl"]...
+		} else if osName == "windows" {
+			libs <- ["-lws2_32", "-lbcrypt"]...
+		}
+
+		pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: juice
+Description: UDP Interactive Connectivity Establishment (ICE) library
+Version: ` + version + `
+Libs: ` + libs.join(" ") + `
+Cflags: ` + cflags.join(" ") + `
+`
+		os.writeFile(filepath.join(pcDir, "juice.pc"), []byte(pc), 0o644)!
+		pcName = "juice"
+	}
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup(pcName)!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	pcName := ""
+	for name in ["libjuice.pc", "juice.pc"] {
+		_, err := os.stat(filepath.join(pcDir, name))
+		if err == nil {
+			pcName = name.trimSuffix(".pc")
+			break
+		} else if !os.isNotExist(err) {
+			panic err
+		}
+	}
+	if pcName == "" {
+		panic "installed libjuice pkg-config file is missing"
+	}
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "juice.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup(pcName)!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
