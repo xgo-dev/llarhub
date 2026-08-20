@@ -1,0 +1,122 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <oapv.h>
+#include <stdio.h>
+
+int main(void) {
+    unsigned int version_num = 0;
+    const char *version_str = oapv_version(&version_num);
+    if (version_str == 0) {
+        return 1;
+    }
+    printf("%u %s\n", version_num, version_str);
+    return 0;
+}
+`
+
+id "AcademySoftwareFoundation/openapv"
+
+fromVer "v0.2.1.3-fix"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "OAPV_APP_STATIC_BUILD", !shared
+	c.defineBool "OAPV_BUILD_STATIC_LIB", !shared
+	c.defineBool "OAPV_BUILD_SHARED_LIB", shared
+	c.defineBool "ENABLE_TESTS", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	// Upstream installs oapv.pc with CMAKE_INSTALL_PREFIX-expanded paths.
+	// Keep its verified flags while making the installed metadata relocatable.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "oapv.pc")
+	lines := string(os.readFile(pcPath)!).split("\n")
+	for i, line in lines {
+		if line.hasPrefix("prefix=") {
+			line = "prefix=$${pcfiledir}/../.."
+		} else if line.hasPrefix("exec_prefix=") {
+			line = "exec_prefix=$${prefix}"
+		} else if line.hasPrefix("libdir=") {
+			line = "libdir=$${prefix}/lib"
+		} else if line.hasPrefix("includedir=") {
+			line = "includedir=$${prefix}/include/oapv"
+		} else if line.hasPrefix("Cflags:") {
+			cflags := "-I$${prefix}/include -I$${includedir}"
+			if !shared {
+				cflags += " -DOAPV_STATIC_DEFINE"
+			}
+			line = "Cflags: " + cflags
+		} else if line.hasPrefix("Libs:") {
+			libs := "-L$${libdir} -loapv"
+			if !shared {
+				libs = "-L$${libdir}/oapv -loapv"
+			}
+			if slices.contains(target.require["os"], "linux") {
+				libs += " -lm -lpthread"
+			}
+			line = "Libs: " + libs
+		}
+		lines[i] = line
+	}
+	os.writeFile(pcPath, []byte(strings.join(lines, "\n")), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("oapv")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "oapv.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("oapv")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
