@@ -1,0 +1,181 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <pbtools.h>
+
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+struct foo_t {
+    struct pbtools_message_base_t base;
+    int32_t bar;
+};
+
+static void foo_init(void *self_p, struct pbtools_heap_t *heap_p)
+{
+    struct foo_t *foo_p = self_p;
+
+    foo_p->base.heap_p = heap_p;
+    foo_p->bar = 0;
+}
+
+static void foo_encode_inner(struct pbtools_encoder_t *encoder_p, void *self_p)
+{
+    struct foo_t *foo_p = self_p;
+
+    pbtools_encoder_write_int32(encoder_p, 1, foo_p->bar);
+}
+
+static void foo_decode_inner(struct pbtools_decoder_t *decoder_p, void *self_p)
+{
+    int wire_type;
+    struct foo_t *foo_p = self_p;
+
+    while (pbtools_decoder_available(decoder_p)) {
+        switch (pbtools_decoder_read_tag(decoder_p, &wire_type)) {
+        case 1:
+            foo_p->bar = pbtools_decoder_read_int32(decoder_p, wire_type);
+            break;
+        default:
+            pbtools_decoder_skip_field(decoder_p, wire_type);
+            break;
+        }
+    }
+}
+
+int main(void)
+{
+    int size;
+    uint8_t workspace[64];
+    uint8_t encoded[16];
+    struct foo_t *foo_p;
+
+    foo_p = pbtools_message_new(&workspace[0], sizeof(workspace), sizeof(*foo_p), foo_init);
+    if (foo_p == NULL) {
+        return 1;
+    }
+
+    foo_p->bar = 78;
+    size = pbtools_message_encode(&foo_p->base, &encoded[0], sizeof(encoded), foo_encode_inner);
+    if (size < 0) {
+        fprintf(stderr, "encode failed: %s\n", pbtools_error_code_to_string(-size));
+        return 2;
+    }
+
+    foo_p = pbtools_message_new(&workspace[0], sizeof(workspace), sizeof(*foo_p), foo_init);
+    if (foo_p == NULL) {
+        return 3;
+    }
+
+    size = pbtools_message_decode(&foo_p->base, &encoded[0], size, foo_decode_inner);
+    if (size < 0) {
+        fprintf(stderr, "decode failed: %s\n", pbtools_error_code_to_string(-size));
+        return 4;
+    }
+    if (foo_p->bar != 78) {
+        fprintf(stderr, "unexpected bar: %d\n", foo_p->bar);
+        return 5;
+    }
+
+    printf("encoded and decoded Foo.bar=%d\n", foo_p->bar);
+    return 0;
+}
+`
+
+id "eerimoq/pbtools"
+
+fromVer "0.45.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(filepath.join(ctx.SourceDir, "lib"), filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "pbtools", "version.py"))!).split("\n") {
+		if line.hasPrefix("__version__ = ") {
+			version = strings.trim(line.trimPrefix("__version__ = "), `'"`)
+			break
+		}
+	}
+	if version == "" {
+		panic "pbtools/version.py has no __version__"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: pbtools
+Description: Google Protocol Buffers C library
+Version: ` + version + `
+Libs: -L$${libdir} -lpbtools
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "pbtools.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("pbtools")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "pbtools.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("pbtools")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c11", consumer, "-o", binary, "@"+flagsFile
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
