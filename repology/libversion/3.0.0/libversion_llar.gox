@@ -1,0 +1,165 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <assert.h>
+#include <libversion/version.h>
+
+int main() {
+    /* 0.99 < 1.11 */
+    assert(version_compare2("0.99", "1.11") == -1);
+
+    /* 1.0 == 1.0.0 */
+    assert(version_compare2("1.0", "1.0.0") == 0);
+
+    /* 1.0alpha1 < 1.0.rc1 */
+    assert(version_compare2("1.0alpha1", "1.0.rc1") == -1);
+
+    /* 1.0 > 1.0.rc1 */
+    assert(version_compare2("1.0", "1.0-rc1") == 1);
+
+    /* 1.2.3alpha4 is the same as 1.2.3~a4 */
+    assert(version_compare2("1.2.3alpha4", "1.2.3~a4") == 0);
+
+    /* by default, `p' is treated as `pre'... */
+    assert(version_compare2("1.0p1", "1.0pre1") == 0);
+    assert(version_compare2("1.0p1", "1.0post1") == -1);
+    assert(version_compare2("1.0p1", "1.0patch1") == -1);
+
+    /* ...but this is tunable: here it's handled as `patch` */
+    assert(version_compare4("1.0p1", "1.0pre1", VERSIONFLAG_P_IS_PATCH, 0) == 1);
+    assert(version_compare4("1.0p1", "1.0post1", VERSIONFLAG_P_IS_PATCH, 0) == 0);
+    assert(version_compare4("1.0p1", "1.0patch1", VERSIONFLAG_P_IS_PATCH, 0) == 0);
+
+    /* a way to check that the version belongs to a given release */
+    assert(
+        (version_compare4("1.0alpha1", "1.0", 0, VERSIONFLAG_LOWER_BOUND) == 1) &&
+        (version_compare4("1.0alpha1", "1.0", 0, VERSIONFLAG_UPPER_BOUND) == -1) &&
+        (version_compare4("1.0.1", "1.0", 0, VERSIONFLAG_LOWER_BOUND) == 1) &&
+        (version_compare4("1.0.1", "1.0", 0, VERSIONFLAG_UPPER_BOUND) == -1)
+        /* 1.0alpha1 and 1.0.1 belong to 1.0 release, e.g. they lie between
+           (lowest possible version in 1.0) and (highest possible version in 1.0) */
+    );
+}
+`
+
+id "repology/libversion"
+
+fromVer "3.0.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"build_tools": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "build_tools" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	buildTools := target.options["build_tools"][0] == "ON"
+
+	// Upstream always adds tests/ and utils/ with no CMake option to skip them.
+	os.writeFile(filepath.join(ctx.SourceDir, "tests", "CMakeLists.txt"), []byte(""), 0o644)!
+	if !buildTools {
+		os.writeFile(filepath.join(ctx.SourceDir, "utils", "CMakeLists.txt"), []byte(""), 0o644)!
+	}
+
+	// Shared and static targets are both installed. Keep only the selected one
+	// so pkg-config -lversion resolves the matching library.
+	libCMake := filepath.join(ctx.SourceDir, "libversion", "CMakeLists.txt")
+	libLists := string(os.readFile(libCMake)!)
+	installed := "libversion_static"
+	if shared {
+		installed = "libversion"
+	}
+	libLists = strings.replace(libLists, "install(TARGETS libversion libversion_static EXPORT libversion", "install(TARGETS "+installed+" EXPORT libversion", 1)
+	os.writeFile(libCMake, []byte(libLists), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	// CMake writes prefix from CMAKE_INSTALL_PREFIX. Keep the generated flags
+	// and make the installed file relocatable.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "libversion.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+	pc = strings.replace(pc, "exec_prefix="+installDir, "exec_prefix=$${prefix}", 1)
+	pc = strings.replace(pc, "libdir="+filepath.join(installDir, "lib"), "libdir=$${prefix}/lib", 1)
+	pc = strings.replace(pc, "includedir="+filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+
+	if shared && slices.contains(target.require["os"], "windows") {
+		pc = strings.replace(pc, "-lversion", "-llibversion", 1)
+	}
+
+	if !shared {
+		lines := pc.split("\n")
+		privateCflags := ""
+		for line in lines {
+			if line.hasPrefix("Cflags.private:") {
+				privateCflags = line.trimPrefix("Cflags.private:").trimSpace()
+			}
+		}
+		if privateCflags != "" {
+			for i, line in lines {
+				if line.hasPrefix("Cflags:") {
+					lines[i] = line + " " + privateCflags
+				}
+			}
+			pc = strings.join(lines, "\n")
+		}
+	}
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libversion")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libversion.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libversion")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
