@@ -1,0 +1,122 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <cstdio>
+#include <mstch/mstch.hpp>
+
+int main() {
+  mstch::map root{
+      {"it", "works"},
+      {"happy", true},
+      {"various",
+       mstch::array{
+           mstch::map{{"value", nullptr}},
+           mstch::map{{"value", 0ll}},
+           mstch::map{{"value", 3.14}},
+           mstch::map{{"value", false}},
+       }},
+  };
+
+  puts(mstch::render(R"(>>> It {{it}}
+    I'm {{^happy}}not {{/happy}}happy about it.
+    Various:
+{{#various}}
+        - {{value}};
+{{/various}}
+)",
+                     root)
+           .c_str());
+}
+`
+
+id "mbits-libs/libmstch"
+
+fromVer "v1.0.4"
+
+defaults {
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "WITH_UNIT_TESTS", false
+	c.defineBool "WITH_BENCHMARK", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+		if line.hasPrefix("set(mstch_VERSION ") {
+			version = line.trimPrefix("set(mstch_VERSION ").trimSuffix(")")
+			break
+		}
+	}
+	if version == "" {
+		panic "mstch CMakeLists.txt has no mstch_VERSION"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: mstch
+Description: libmstch implemented in terms of C++17 variant
+Version: ` + version + `
+Libs: -L$${libdir} -lmstch
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "mstch.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("mstch")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("mstch")!
+	flagsFile := filepath.join(testDir, "mstch.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
