@@ -1,0 +1,113 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+id "Amanieu/asyncplusplus"
+
+// Upstream tags v1.0, v1.1, and v1.2 share an identical CMake build and
+// install contract, so a single formula covers the complete tag range.
+fromVer "v1.0"
+
+// Async++ is a self-contained C++11 concurrency framework. Upstream only needs
+// the system threads library (find_package(Threads)); it declares no external
+// packages, so there is no onRequire.
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	// Upstream declares cmake_minimum_required(VERSION 3.1); modern CMake needs
+	// this shim to accept the old policy baseline.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+
+	c.configure
+	c.build
+	c.install
+
+	// No pkg-config file is installed upstream, so derive flags from the
+	// installed interface. Async++ links Threads::Threads PUBLIC, so pthread
+	// follows the library in the static link order.
+	metadata := "-I${filepath.join(installDir, `include`)} -L${filepath.join(installDir, `lib`)} -lasync++ -lpthread"
+	if !shared {
+		metadata = "-DLIBASYNC_STATIC ${metadata}"
+	}
+	ctx.setMetadata metadata
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Keep the test build tree independent of the onBuild scratch tree so the
+	// test also works on a cache hit, when onBuild (and its _build dir) does
+	// not run. ctx.SourceDir is a fresh checkout that always exists.
+	testDir := filepath.join(ctx.SourceDir, "_test")
+	os.mkdirAll(testDir, 0o755)!
+
+	// Consumer derived from the Conan test_package: include <async++.h> and
+	// exercise the public spawn/then/when_all/parallel_reduce API, then run it.
+	consumerSource := `#include <async++.h>
+#include <iostream>
+
+int main() {
+	auto t1 = async::spawn([] { std::cout << "task1\n"; });
+	auto t2 = async::spawn([]() -> int { return 42; });
+	auto t3 = t2.then([](int v) -> int { return v * 3; });
+	auto t4 = async::when_all(t1, t3);
+	t4.get();
+
+	int r = async::parallel_reduce({1, 2, 3, 4}, 0, [](int x, int y) {
+		return x + y;
+	});
+	if (r != 10) {
+		std::cerr << "unexpected reduce result: " << r << "\n";
+		return 1;
+	}
+	std::cout << "async++ ok: " << r << "\n";
+	return 0;
+}
+`
+	src := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(src, []byte(consumerSource), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	bin := filepath.join(testDir, "consumer")
+	args := []string{"-std=c++11", "-I", filepath.join(installDir, "include"), "-o", bin, src, "-L", filepath.join(installDir, "lib"), "-lasync++", "-lpthread"}
+	if !shared {
+		args <- "-DLIBASYNC_STATIC"
+	}
+	exec! "g++", args...
+
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! bin
+}
