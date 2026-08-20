@@ -1,0 +1,107 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <dnet.h>
+#include <dnet/addr.h>
+
+int main(void) {
+	struct addr a;
+	return addr_pton("127.0.0.1", &a) < 0;
+}
+`
+
+id "ofalk/libdnet"
+
+fromVer "libdnet-1.18.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+		if line.hasPrefix("project(dnet VERSION ") {
+			version = line.trimPrefix("project(dnet VERSION ").split(" ")[0]
+			break
+		}
+	}
+	if version == "" {
+		panic "libdnet CMakeLists.txt has no project version"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: dnet
+Description: Portable low-level networking library
+Version: ${version}
+Libs: -L$${libdir} -ldnet
+Cflags: -I$${includedir} -I$${includedir}/dnet
+`
+	os.writeFile(filepath.join(pcDir, "dnet.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("dnet")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "dnet.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("dnet")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
