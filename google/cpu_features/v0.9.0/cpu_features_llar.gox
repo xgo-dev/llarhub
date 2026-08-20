@@ -1,0 +1,146 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <cpu_features_macros.h>
+#if defined(CPU_FEATURES_ARCH_X86)
+#include <cpuinfo_x86.h>
+#elif defined(CPU_FEATURES_ARCH_ARM)
+#include <cpuinfo_arm.h>
+#elif defined(CPU_FEATURES_ARCH_AARCH64)
+#include <cpuinfo_aarch64.h>
+#elif defined(CPU_FEATURES_ARCH_MIPS)
+#include <cpuinfo_mips.h>
+#elif defined(CPU_FEATURES_ARCH_PPC)
+#include <ccpuinfo_ppc.h>
+#endif
+
+#include <stdlib.h>
+#include <stdio.h>
+
+int main()
+{
+#if defined(CPU_FEATURES_ARCH_X86)
+    X86Features features = GetX86Info().features;
+#elif defined(CPU_FEATURES_ARCH_ARM)
+    ArmFeatures features = GetArmInfo().features;
+#elif defined(CPU_FEATURES_ARCH_AARCH64)
+    Aarch64Features features = GetAarch64Info().features;
+#elif defined(CPU_FEATURES_ARCH_MIPS)
+    MipsFeatures features = GetMipsInfo().features;
+#elif defined(CPU_FEATURES_ARCH_PPC)
+    PPCFeatures features = GetPPCInfo().features;
+#endif
+
+#if defined(CPU_FEATURES_ARCH_X86) || defined(CPU_FEATURES_ARCH_ARM) || defined(CPU_FEATURES_ARCH_AARCH64)
+    printf("AES is%s available\n", features.aes ? "" : "n't");
+#elif defined(CPU_FEATURES_ARCH_MIPS)
+    printf("EVA is%s available\n", features.eva ? "" : "n't");
+#elif defined(CPU_FEATURES_ARCH_PPC)
+    printf("SPE is%s available\n", features.spe ? "" : "n't");
+#endif
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "google/cpu_features"
+
+fromVer "v0.9.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+		if line.hasPrefix("project(CpuFeatures VERSION ") {
+			version = line.trimPrefix("project(CpuFeatures VERSION ").split(" ")[0]
+			break
+		}
+	}
+	if version == "" {
+		panic "cpu_features CMakeLists.txt has no project version"
+	}
+
+	libs := "-L$${libdir} -lcpu_features"
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs += " -ldl"
+	}
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: cpu_features
+Description: A cross platform C99 library to get cpu features at runtime
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: -I$${includedir}/cpu_features
+`
+	os.writeFile(filepath.join(pcDir, "cpu_features.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("cpu_features")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("cpu_features")!
+	flagsFile := filepath.join(testDir, "cpu_features.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c99", consumer, "-o", binary, "@"+flagsFile
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
