@@ -1,0 +1,16 @@
+import "strings"
+
+// Upstream tags mix GNU-incompatible spellings: v0.5.12, 1.0.1, and LC2.2.0.
+// GNU orders v0.5.12 above LC2.2.0, so map LC2.2.0 to 2.2.0, strip an optional
+// v, then compare as semantic versions. Every visible tag is in this domain:
+// 1.0.0, 1.0.1, 1.1.0-rc1, LC2.2.0, v0.5.10, v0.5.12.
+func normalize(version string) string {
+	if version == "LC2.2.0" {
+		version = "2.2.0"
+	}
+	return "v" + strings.trimPrefix(version, "v")
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
