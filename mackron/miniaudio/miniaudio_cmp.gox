@@ -1,0 +1,32 @@
+// CCI carries older miniaudio releases as commit refs because those releases
+// do not have upstream tags. Map every CCI ref and every current upstream tag
+// to its release version before comparing the complete visible set.
+func normalize(version string) string {
+	switch version {
+	case "8bf157f10e278302f8a6c1c9cd1065f2bea26dd2":
+		return "v0.10.39"
+	case "37fe1343f04f6fd9bd82229ca50a48b77ecce564":
+		return "v0.10.40"
+	case "42abbbea4602af80d1ccb4a22cdc35813aceee7a":
+		return "v0.11.2"
+	case "c3a9ab9b900b1ac316f7e2cb5e05e5cc27179f19":
+		return "v0.11.6"
+	case "073b7bbbba3a27adcf44fd62bd055ccee67e1973":
+		return "v0.11.7"
+	case "82e70f4cbe6e613c8edc0ac7b97ff3dd00f2ca27":
+		return "v0.11.8"
+	case "4dfe7c4c31df46e78d9a1cc0d2d6f1aef5a5d58c":
+		return "v0.11.9"
+	case "a0dc1037f99a643ff5fad7272cd3d6461f2d63fa":
+		return "v0.11.11"
+	case "0.10.39", "0.10.40", "0.11.2", "0.11.6", "0.11.7", "0.11.8", "0.11.9", "0.11.11":
+		return "v" + version
+	case "0.11.15", "0.11.16", "0.11.17", "0.11.18", "0.11.19", "0.11.20", "0.11.21", "0.11.22", "0.11.23", "0.11.24", "0.11.25":
+		return "v" + version
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
