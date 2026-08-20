@@ -1,0 +1,116 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <meshoptimizer.h>
+
+int main() {
+    float positions[] = {
+        0.f, 0.f, 0.f,
+        1.f, 0.f, 0.f,
+        0.f, 1.f, 0.f,
+    };
+    unsigned int indices[] = {0, 1, 2};
+    unsigned int destination[3];
+    size_t n = meshopt_simplify(destination, indices, 3, positions, 3, sizeof(float) * 3, 3, 1.f, 0, 0);
+    size_t bound = meshopt_buildMeshletsBound(3, 64, 124);
+    return n > 0 && bound > 0 ? 0 : 1;
+}
+`
+
+id "zeux/meshoptimizer"
+
+fromVer "v1.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "MESHOPT_BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "MESHOPT_BUILD_DEMO", false
+	c.defineBool "MESHOPT_BUILD_GLTFPACK", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.md"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.md"))!, 0o644)!
+
+	version := ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+		if line.hasPrefix("project(meshoptimizer VERSION ") {
+			version = line.trimPrefix("project(meshoptimizer VERSION ").split(" ")[0]
+			break
+		}
+	}
+	if version == "" {
+		panic "meshoptimizer CMakeLists.txt has no project version"
+	}
+
+	// Upstream installs CMake package files only; publish relocatable pkg-config
+	// flags for the installed libmeshoptimizer and meshoptimizer.h.
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: meshoptimizer
+Description: Mesh optimization library that makes meshes smaller and faster to render
+Version: ` + version + `
+Libs: -L$${libdir} -lmeshoptimizer
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "meshoptimizer.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("meshoptimizer")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "meshoptimizer.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("meshoptimizer")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
