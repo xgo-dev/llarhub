@@ -1,0 +1,11 @@
+import "strings"
+
+// Complete tag set: v1.0 .. v1.12. GNU compares the first digit after "v1.",
+// so v1.9 > v1.12. Strip the prefix, then compare the remainder as semver.
+func normalize(version string) string {
+	return strings.trimPrefix(version, "v")
+}
+
+compareVer (a, b) => {
+	return semver.Compare("v"+normalize(a.Version), "v"+normalize(b.Version))
+}
