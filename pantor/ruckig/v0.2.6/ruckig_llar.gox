@@ -1,16 +1,21 @@
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 id "pantor/ruckig"
 
-fromVer "v0.17.3"
+fromVer "v0.2.6"
 
 onBuild ctx => {
 	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
 
-	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
 	c.buildType "Release"
 
-	// ruckig is a C++20 CMake library. Build only the core static library:
+	// Build only the core static library:
 	// disable the examples, unit tests, the nanobind Python wrapper and the
 	// (network) cloud client, matching the community package interface. The
 	// cloud client would otherwise inject vendored third_party headers and a
@@ -21,13 +26,15 @@ onBuild ctx => {
 	c.defineBool "BUILD_TESTS", false
 	c.defineBool "BUILD_PYTHON_MODULE", false
 	c.defineBool "BUILD_CLOUD_CLIENT", false
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
 
 	c.configure
 	c.build
 	c.install
 
-	// Consumers link the installed "ruckig" library (target ruckig::ruckig).
-	ctx.setMetadata "-lruckig"
+	// Upstream installs headers and the static library under these relocatable
+	// directories; expose the complete flags to dependent consumers.
+	ctx.setMetadata "-I${includeDir} -L${libDir} -lruckig"
 }
 
 onTest ctx => {
@@ -35,8 +42,8 @@ onTest ctx => {
 
 	// Keep the consumer build in its own tree so onTest behaves identically
 	// on a cache hit (onBuild skipped, no _build dir) and a cache miss.
-	testDir := ctx.SourceDir + "/_testconsumer"
-	testBuild := testDir + "/_build"
+	testDir := filepath.join(ctx.SourceDir, "_testconsumer")
+	testBuild := filepath.join(testDir, "_build")
 
 	os.mkdirAll(testDir, 0o755)!
 
@@ -51,6 +58,9 @@ int main() {
     InputParameter<1> input;
     OutputParameter<1> output;
 
+    input.current_position = {0.0};
+    input.current_velocity = {0.0};
+    input.current_acceleration = {0.0};
     input.target_position = {1.0};
     input.max_velocity = {1.0};
     input.max_acceleration = {1.0};
@@ -61,9 +71,9 @@ int main() {
     return 0;
 }
 `
-	os.writeFile(testDir+"/test_package.cpp", []byte(cpp), 0o644)!
+	os.writeFile(filepath.join(testDir, "test_package.cpp"), []byte(cpp), 0o644)!
 
-	cml := `cmake_minimum_required(VERSION 3.15)
+	cml := `cmake_minimum_required(VERSION 3.10)
 project(ruckig_test_package LANGUAGES CXX)
 
 find_package(ruckig REQUIRED CONFIG)
@@ -71,18 +81,15 @@ find_package(ruckig REQUIRED CONFIG)
 add_executable(test_package test_package.cpp)
 target_link_libraries(test_package PRIVATE ruckig::ruckig)
 `
-	os.writeFile(testDir+"/CMakeLists.txt", []byte(cml), 0o644)!
+	os.writeFile(filepath.join(testDir, "CMakeLists.txt"), []byte(cml), 0o644)!
 
-	tc := cmake.new(testDir, testBuild, testBuild+"/_out")
+	tc := cmake.new(testDir, testBuild, filepath.join(testBuild, "_out"))
 	tc.buildType "Release"
 	tc.use installDir
 
 	tc.configure
 	tc.build
 
-	// A non-zero exit surfaces via lastErr and fails the test.
-	exec testBuild + "/test_package"
-	if lastErr != nil {
-		panic lastErr
-	}
+	binary := filepath.join(testBuild, "test_package")
+	exec! binary
 }
