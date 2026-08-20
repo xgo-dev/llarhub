@@ -1,0 +1,33 @@
+import (
+	"strconv"
+	"strings"
+)
+
+func normalize(version string) string {
+	if version.hasPrefix("v.") {
+		version = "v" + version.trimPrefix("v.")
+	}
+	if semver.isValid(version) {
+		return version
+	}
+	// Four-part tags such as v5.8.5.1 are not Go semver. Keep them in
+	// semver.Compare's domain by mapping the extra component to a
+	// prerelease of the next patch so v5.8.5 < v5.8.5.1 < v5.8.6.
+	if version.hasPrefix("v") {
+		parts := strings.split(version[1:], ".")
+		if parts.len == 4 {
+			patch := strconv.atoi(parts[2])!
+			next := patch + 1
+			return "v" + parts[0] + "." + parts[1] + "." + next.string + "-" + parts[3]
+		}
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	cmp := semver.Compare(normalize(a.Version), normalize(b.Version))
+	if cmp != 0 {
+		return cmp
+	}
+	return strings.compare(a.Version, b.Version)
+}
