@@ -1,0 +1,142 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <SevenBit/DI.hpp>
+
+using namespace sb::di;
+
+struct Service {
+    int value() const { return 42; }
+};
+
+int main() {
+    ServiceProvider provider = ServiceCollection{}.addSingleton<Service>().buildServiceProvider();
+    return provider.getService<Service>().value() == 42 ? 0 : 1;
+}
+`
+
+id "7bitcoder/7bitDI"
+
+fromVer "v3.4.0"
+
+defaults {
+	"header_only": "OFF",
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "header_only" && name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	headerOnly := target.options["header_only"][0] == "ON"
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	libraryType := "Static"
+	if headerOnly {
+		libraryType = "HeaderOnly"
+	} else if shared {
+		libraryType = "Shared"
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "_7BIT_DI_BUILD_EXAMPLES", false
+	c.defineBool "_7BIT_DI_BUILD_TESTS", false
+	c.defineBool "_7BIT_DI_BUILD_DOC", false
+	c.defineBool "_7BIT_DI_BUILD_DOCS", false
+	c.defineBool "_7BIT_DI_BUILD_SINGLE_HEADER", false
+	c.defineBool "_7BIT_DI_INSTALL", true
+	c.define "_7BIT_DI_LIBRARY_TYPE", libraryType
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in strings.split(string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!), "\n") {
+		fields := strings.fields(line)
+		if fields.len >= 2 {
+			if fields[0] == "set(_7BIT_DI_VERSION_MAJOR" {
+				version = strings.trim(fields[1], ")")
+			} else if fields[0] == "set(_7BIT_DI_VERSION_MINOR" {
+				version += "." + strings.trim(fields[1], ")")
+			} else if fields[0] == "set(_7BIT_DI_VERSION_PATCH" {
+				version += "." + strings.trim(fields[1], ")")
+			}
+		}
+	}
+	if version == "" {
+		panic "7bitDI CMakeLists.txt does not declare a project version"
+	}
+
+	libs := []string{}
+	if !headerOnly {
+		libs <- "-L$${libdir}"
+		libs <- "-l7bitDI"
+		if slices.contains(target.require["os"], "linux") {
+			libs <- "-lm"
+		}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: 7bitDI
+Description: a simple C++ dependency injection library
+Version: ` + version + `
+Libs: ` + strings.join(libs, " ") + `
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "7bitDI.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("7bitDI")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "7bitDI.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("7bitDI")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
