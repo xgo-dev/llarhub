@@ -1,0 +1,128 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include "MiniScript/SimpleString.h"
+#include "MiniScript/UnicodeUtil.h"
+#include "MiniScript/SimpleVector.h"
+#include "MiniScript/List.h"
+#include "MiniScript/Dictionary.h"
+#include "MiniScript/MiniscriptParser.h"
+#include "MiniScript/MiniscriptInterpreter.h"
+
+#include <iostream>
+
+int main() {
+	MiniScript::Interpreter interp;
+
+	interp.standardOutput = [](MiniScript::String s) { std::cout << s.c_str() << std::endl; };
+	interp.errorOutput = [](MiniScript::String s) { std::cerr << s.c_str() << std::endl; };
+	interp.implicitOutput = [](MiniScript::String s) { std::cout << s.c_str() << std::endl; };
+
+	interp.REPL("x = 5");
+	interp.REPL("print \"x = \" + x");
+	interp.REPL("y = 5 + x");
+	interp.REPL("print \"y = \" + y");
+
+	return 0;
+}
+`
+
+id "JoeStrout/miniscript"
+
+fromVer "v1.6.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "MINISCRIPT_BUILD_TESTING", false
+	c.defineBool "MINISCRIPT_BUILD_CSHARP", false
+	c.configure
+	c.build
+	c.install
+
+	headerSrc := filepath.join(ctx.SourceDir, "MiniScript-cpp", "src", "MiniScript")
+	headerDst := filepath.join(installDir, "include", "MiniScript")
+	os.mkdirAll(headerDst, 0o755)!
+	for entry in os.readDir(headerSrc)! {
+		if entry.isDir || !entry.name.hasSuffix(".h") {
+			continue
+		}
+		os.writeFile(filepath.join(headerDst, entry.name), os.readFile(filepath.join(headerSrc, entry.name))!, 0o644)!
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := "-L$${libdir} -lminiscript-cpp"
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs += " -lm -lpthread"
+	}
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: miniscript
+Description: MiniScript embedded scripting language
+Version: 1.6.2
+Libs: ` + libs + `
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "miniscript.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("miniscript")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "miniscript.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("miniscript")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++14", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
