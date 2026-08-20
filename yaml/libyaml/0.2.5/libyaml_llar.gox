@@ -1,0 +1,193 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <yaml.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+struct fruit {
+    char *name;
+    char *color;
+    int count;
+};
+struct fruit data[] = {
+    {"apple", "red", 12},
+    {"orange", "orange", 3},
+    {"banana", "yellow", 4},
+    {"mango", "green", 1},
+    {NULL, NULL, 0}
+};
+
+int main(void)
+{
+    yaml_emitter_t emitter;
+    yaml_event_t event;
+    struct fruit *f;
+    char buffer[64];
+
+    yaml_emitter_initialize(&emitter);
+    yaml_emitter_set_output_file(&emitter, stdout);
+
+    yaml_stream_start_event_initialize(&event, YAML_UTF8_ENCODING);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_document_start_event_initialize(&event, NULL, NULL, NULL, 0);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_mapping_start_event_initialize(&event, NULL, (yaml_char_t *)YAML_MAP_TAG,
+        1, YAML_ANY_MAPPING_STYLE);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_STR_TAG,
+        (yaml_char_t *)"fruit", strlen("fruit"), 1, 0, YAML_PLAIN_SCALAR_STYLE);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_sequence_start_event_initialize(&event, NULL, (yaml_char_t *)YAML_SEQ_TAG,
+       1, YAML_ANY_SEQUENCE_STYLE);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    for (f = data; f->name; f++) {
+        yaml_mapping_start_event_initialize(&event, NULL, (yaml_char_t *)YAML_MAP_TAG,
+            1, YAML_ANY_MAPPING_STYLE);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+        yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_STR_TAG,
+            (yaml_char_t *)"name", strlen("name"), 1, 0, YAML_PLAIN_SCALAR_STYLE);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+        yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_STR_TAG,
+            (yaml_char_t *)f->name, strlen(f->name), 1, 0, YAML_PLAIN_SCALAR_STYLE);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+        yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_STR_TAG,
+            (yaml_char_t *)"color", strlen("color"), 1, 0, YAML_PLAIN_SCALAR_STYLE);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+        yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_STR_TAG,
+            (yaml_char_t *)f->color, strlen(f->color), 1, 0, YAML_PLAIN_SCALAR_STYLE);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+        yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_STR_TAG,
+            (yaml_char_t *)"count", strlen("count"), 1, 0, YAML_PLAIN_SCALAR_STYLE);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+        sprintf(buffer, "%d", f->count);
+        yaml_scalar_event_initialize(&event, NULL, (yaml_char_t *)YAML_INT_TAG,
+            (yaml_char_t *)buffer, strlen(buffer), 1, 0, YAML_PLAIN_SCALAR_STYLE);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+        yaml_mapping_end_event_initialize(&event);
+        if (!yaml_emitter_emit(&emitter, &event)) goto error;
+    }
+
+    yaml_sequence_end_event_initialize(&event);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_mapping_end_event_initialize(&event);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_document_end_event_initialize(&event, 0);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_stream_end_event_initialize(&event);
+    if (!yaml_emitter_emit(&emitter, &event)) goto error;
+
+    yaml_emitter_delete(&emitter);
+    return 0;
+
+error:
+    fprintf(stderr, "Failed to emit event %d: %s\n", event.type, emitter.problem);
+    yaml_emitter_delete(&emitter);
+    return 1;
+}
+`
+
+id "yaml/libyaml"
+
+fromVer "0.2.5"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "INSTALL_CMAKE_DIR", "lib/cmake/libyaml"
+	c.define "YAML_STATIC_LIB_NAME", "yaml"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "INSTALL_LIB_DIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "BUILD_TESTING", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "License"), os.readFile(filepath.join(ctx.SourceDir, "License"))!, 0o644)!
+
+	// Upstream CMake does not install pkg-config metadata.
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: yaml
+Description: LibYAML is a YAML parser and emitter library
+Version: 0.2.5
+Libs: -L$${libdir} -lyaml
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "yaml.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("yaml")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "yaml.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("yaml")!), 0o644)!
+	cc! consumer, "@${flagsFile}", "-o", binary
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
