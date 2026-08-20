@@ -1,0 +1,14 @@
+import "strings"
+
+// GNU orders unprefixed 1.6.1 below v1.6.0. Normalize the optional v so
+// mixed tags stay in release order.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
