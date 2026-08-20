@@ -1,0 +1,137 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <cassert>
+#include <string>
+
+#include <uni_algo/all.h>
+
+int main() {
+    {
+        std::string str8 = una::utf16to8(u"Te\xD800st");
+        assert(str8 == "Te\xEF\xBF\xBDst");
+    }
+
+    {
+        una::error error;
+        std::string str8 = una::strict::utf16to8(u"Te\xD800st", error);
+        assert(str8.empty() && error && error.pos() == 2);
+    }
+
+    return 0;
+}
+`
+
+id "uni-algo/uni-algo"
+
+fromVer "v1.2.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"header_only": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "header_only" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	headerOnly := target.options["header_only"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "UNI_ALGO_HEADER_ONLY", headerOnly
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE.md"))!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.md"), license, 0o644)!
+
+	version := ""
+	for line in strings.split(string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!), "\n") {
+		fields := strings.fields(line)
+		if fields.len >= 3 && fields[0] == `project("uni-algo"` && fields[1] == "VERSION" {
+			version = fields[2]
+			break
+		}
+	}
+	if version == "" {
+		panic "uni-algo CMakeLists.txt does not declare a project version"
+	}
+
+	libs := []string{}
+	if !headerOnly {
+		libs <- "-L$${libdir}"
+		libs <- "-luni-algo"
+	}
+	if slices.contains(target.require["os"], "linux") {
+		libs <- "-lm"
+	}
+	cflags := "-I$${includedir}"
+	if headerOnly {
+		cflags += " -DUNI_ALGO_STATIC_DATA"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: uni-algo
+Description: Unicode Algorithms Implementation for C/C++
+Version: ` + version + `
+Libs: ` + strings.join(libs, " ") + `
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "uni-algo.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("uni-algo")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "uni-algo.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("uni-algo")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
