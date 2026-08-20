@@ -173,9 +173,13 @@ does not turn command strings into a POSIX shell language.
 - Invoke a verified shell explicitly when a build step truly requires pipes,
   redirection, globbing, command substitution, or shell operators.
 
-Keep build commands inside `onBuild` or `onTest`. Prefer the active LLAR CMake or
-Autotools helper when it owns the upstream build flow; use gsh for unsupported
-build systems and additional source-backed steps.
+Keep build commands inside `onBuild` or `onTest`. In `onBuild`, compile C/C++
+packages with the active LLAR CMake or Autotools helper so `cmake`,
+`configure`, and `make` run through execbroker. Do not call gsh `cc`, `c++`,
+`ar`, or `ld` from `onBuild`; that skips later LLAR cross-compile toolchain
+injection. `onTest` may use `cc!` or `c++!` to compile the consumer against
+installed metadata. Use gsh for non-compile steps and for build systems that
+are not CMake or Make.
 
 During the final style pass, review every `exec "literal-name", ...` call. When
 the literal is a valid, unshadowed identifier, rewrite it as a direct gsh
