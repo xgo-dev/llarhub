@@ -1,0 +1,131 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include "pdfgen.h"
+
+int main() {
+    struct pdf_info info = {
+        .creator = "My software",
+        .producer = "My software",
+        .title = "My document",
+        .author = "My name",
+        .subject = "My subject",
+        .date = "Today"
+    };
+    struct pdf_doc *pdf = pdf_create(PDF_A4_WIDTH, PDF_A4_HEIGHT, &info);
+
+    pdf_destroy(pdf);
+
+    return 0;
+}
+`
+
+id "AndreRenaud/PDFGen"
+
+fromVer "0.1.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	cflags := "-std=c99 -O3"
+	if shared || fPIC {
+		cflags += " -fPIC"
+	}
+
+	a := autotools.new(ctx.SourceDir, ctx.SourceDir, installDir)
+	builtLib := "libpdfgen.a"
+	if shared {
+		a.build "pdfgen", "CFLAGS="+cflags, "LDFLAGS=-shared"
+		builtLib = "pdfgen"
+	} else {
+		obj := "pdfgen.o"
+		if slices.contains(target.require["os"], "windows") {
+			obj = "pdfgen.obj"
+		}
+		a.build "libpdfgen.a("+obj+")", "CFLAGS="+cflags
+	}
+
+	includeDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(libDir, 0o755)!
+	os.mkdirAll(licenseDir, 0o755)!
+
+	libName := "libpdfgen.a"
+	if shared {
+		libName = "libpdfgen.so"
+		if slices.contains(target.require["os"], "darwin") {
+			libName = "libpdfgen.dylib"
+		} else if slices.contains(target.require["os"], "windows") {
+			libName = "pdfgen.dll"
+		}
+	}
+
+	cp! filepath.join(ctx.SourceDir, "pdfgen.h"), filepath.join(includeDir, "pdfgen.h")
+	cp! filepath.join(ctx.SourceDir, "LICENSE"), filepath.join(licenseDir, "LICENSE")
+	cp! filepath.join(ctx.SourceDir, builtLib), filepath.join(libDir, libName)
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: pdfgen
+Description: Simple C PDF Writer/Generation library
+Version: 0.1.0
+Libs: -L$${libdir} -lpdfgen
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "pdfgen.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("pdfgen")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+	binary := filepath.join(testDir, "consumer")
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "pdfgen.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("pdfgen")!), 0o644)!
+	cc! sourcePath, "@"+flagsFile, "-o", binary
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
