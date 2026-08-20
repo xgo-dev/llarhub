@@ -48,20 +48,32 @@ filter => {
 
 onBuild ctx => {
 	installDir := ctx.outputDir
-
-	cmakeLists := ctx.Proj.readFile("0.1.0/CMakeLists.txt")!
-	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+	includeDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(libDir, 0o755)!
 
 	shared := slices.contains(target.options["shared"], "ON")
 	fPIC := slices.contains(target.options["fPIC"], "ON")
-	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
-	c.define "PDFGEN_SRC_DIR", ctx.SourceDir
-	c.define "CMAKE_INSTALL_LIBDIR", "lib"
-	c.defineBool "BUILD_SHARED_LIBS", shared
-	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
-	c.configure
-	c.build
-	c.install
+	obj := filepath.join(ctx.SourceDir, "pdfgen.o")
+	ccArgs := ["-std=c99", "-O3", "-c", filepath.join(ctx.SourceDir, "pdfgen.c"), "-o", obj]
+	if shared || fPIC {
+		ccArgs <- "-fPIC"
+	}
+	cc! ccArgs...
+
+	if shared {
+		libName := "libpdfgen.so"
+		if slices.contains(target.require["os"], "darwin") {
+			libName = "libpdfgen.dylib"
+		} else if slices.contains(target.require["os"], "windows") {
+			libName = "pdfgen.dll"
+		}
+		cc! "-shared", "-o", filepath.join(libDir, libName), obj
+	} else {
+		ar! "rcs", filepath.join(libDir, "libpdfgen.a"), obj
+	}
+	os.writeFile(filepath.join(includeDir, "pdfgen.h"), os.readFile(filepath.join(ctx.SourceDir, "pdfgen.h"))!, 0o644)!
 
 	licenseDir := filepath.join(installDir, "licenses")
 	os.mkdirAll(licenseDir, 0o755)!
@@ -73,6 +85,7 @@ onBuild ctx => {
 exec_prefix=$${prefix}
 libdir=$${prefix}/lib
 includedir=$${prefix}/include
+
 Name: pdfgen
 Description: Simple C PDF Writer/Generation library
 Version: 0.1.0
@@ -92,7 +105,6 @@ onTest ctx => {
 
 	sourcePath := filepath.join(testDir, "consumer.c")
 	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
-
 	binary := filepath.join(testDir, "consumer")
 
 	pkgconfig.use installDir
@@ -103,11 +115,6 @@ onTest ctx => {
 	if slices.contains(target.options["shared"], "ON") {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
-		if slices.contains(target.require["os"], "windows") {
-			path := os.getenv("PATH")
-			os.setenv("PATH", filepath.join(installDir, "bin")+";"+path)!
-		}
 	}
-
 	exec! binary
 }
