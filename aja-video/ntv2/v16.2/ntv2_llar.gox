@@ -1,0 +1,310 @@
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+const consumerSource = `#include <string>
+#include <ntv2card.h>
+#include <ntv2utils.h>
+
+int main() {
+    std::string version = NTV2GetVersionString();
+    CNTV2Card card;
+    (void)card.GetDisplayName();
+    return version.empty() ? 1 : 0;
+}
+`
+
+func copyTree(src, dst string) {
+	os.mkdirAll(dst, 0o755)!
+	entries := os.readDir(src)!
+	for entry in entries {
+		from := filepath.join(src, entry.name)
+		to := filepath.join(dst, entry.name)
+		if entry.isDir {
+			copyTree from, to
+			continue
+		}
+		if entry.name.hasSuffix(".h") || entry.name.hasSuffix(".hh") {
+			os.writeFile(to, os.readFile(from)!, 0o644)!
+		}
+	}
+}
+
+func copyIfExists(src, dst string) bool {
+	if _, err := os.stat(src); err != nil {
+		if os.isNotExist(err) {
+			return false
+		}
+		panic err
+	}
+	os.mkdirAll(filepath.dir(dst), 0o755)!
+	os.writeFile(dst, os.readFile(src)!, 0o644)!
+	return true
+}
+
+func cmakeVar(name string) string {
+	return "$" + "{" + name + "}"
+}
+
+func patchBuildOptions(src string) string {
+	src = strings.replace(src, `option(AJA_BUILD_APPS "Build AJA NTV2 applications?" ON)`, `option(AJA_BUILD_APPS "Build AJA NTV2 applications?" OFF)`, 1)
+	src = strings.replace(src, `option(AJA_BUILD_DRIVER "Build AJA NTV2 driver?" ON)`, `option(AJA_BUILD_DRIVER "Build AJA NTV2 driver?" OFF)`, 1)
+	src = strings.replace(src, "set(AJA_BUILD_APPS ON)", "set(AJA_BUILD_APPS OFF)", 1)
+	src = strings.replace(src, "set(AJA_BUILD_DRIVER ON)", "set(AJA_BUILD_DRIVER OFF)", 1)
+
+	sysroot := cmakeVar("CMAKE_OSX_SYSROOT")
+	sdkName := cmakeVar("MACOS_SDK_NAME")
+	sdkVer := cmakeVar("MACOS_SDK_VERSION")
+	patchedGet := false
+	patchedSdk := false
+	var lines []string
+	for line in src.split("\n") {
+		trimmed := line.trimSpace
+		if !patchedGet && trimmed.hasPrefix("get_filename_component(MACOS_SDK_NAME") {
+			lines <- "    if (NOT CMAKE_OSX_SYSROOT)"
+			lines <- "        execute_process(COMMAND xcrun --show-sdk-path OUTPUT_VARIABLE CMAKE_OSX_SYSROOT OUTPUT_STRIP_TRAILING_WHITESPACE)"
+			lines <- "    endif()"
+			lines <- "    get_filename_component(MACOS_SDK_NAME " + sysroot + " NAME_WLE)"
+			patchedGet = true
+			continue
+		}
+		if !patchedSdk && trimmed.hasPrefix(`string(REPLACE "MacOSX" "" MACOS_SDK_VERSION`) {
+			lines <- "    string(REPLACE \"MacOSX\" \"\" MACOS_SDK_VERSION " + sdkName + ")"
+			lines <- "    if (NOT MACOS_SDK_VERSION)"
+			lines <- "        set(MACOS_SDK_VERSION \"11.0\")"
+			lines <- "    endif()"
+			patchedSdk = true
+			continue
+		}
+		if patchedSdk && trimmed.hasPrefix(`string(REPLACE "." ";" MACOS_SDK_VERSION_LIST`) {
+			lines <- "    string(REPLACE \".\" \";\" MACOS_SDK_VERSION_LIST " + sdkVer + ")"
+			continue
+		}
+		if patchedSdk && trimmed == "list(GET MACOS_SDK_VERSION_LIST 1 MACOS_SDK_VERSION_MINOR)" {
+			lines <- "    list(LENGTH MACOS_SDK_VERSION_LIST _aja_sdk_len)"
+			lines <- "    if (_aja_sdk_len GREATER 1)"
+			lines <- "        list(GET MACOS_SDK_VERSION_LIST 1 MACOS_SDK_VERSION_MINOR)"
+			lines <- "    else()"
+			lines <- "        set(MACOS_SDK_VERSION_MINOR 0)"
+			lines <- "    endif()"
+			continue
+		}
+		lines <- [line]...
+	}
+	return strings.join(lines, "\n")
+}
+
+id "aja-video/ntv2"
+
+fromVer "v16.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := runtime.GOOS
+	if values := target.require["os"]; values.len > 0 {
+		osName = values[0]
+	}
+	buildDir := filepath.join(ctx.SourceDir, "_build")
+
+	// Open-source CMake still defaults to building apps and the driver. Keep
+	// the library-only package that Conan installs.
+	for name in ["cmake/AJABuildOptions.cmake", "cmake/BuildOptions.cmake"] {
+		path := filepath.join(ctx.SourceDir, name)
+		if _, err := os.stat(path); err != nil {
+			if os.isNotExist(err) {
+				continue
+			}
+			panic err
+		}
+		os.writeFile(path, []byte(patchBuildOptions(string(os.readFile(path)!))), 0o644)!
+	}
+
+	c := cmake.new(ctx.SourceDir, buildDir, installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "AJA_BUILD_SHARED", shared
+	c.defineBool "AJA_BUILD_OPENSOURCE", true
+	c.defineBool "AJA_BUILD_APPS", false
+	c.defineBool "AJA_BUILD_DRIVER", false
+	c.defineBool "AJA_BUILD_LIBS", true
+	c.defineBool "AJA_INSTALL_HEADERS", true
+	if osName == "darwin" {
+		capout => {
+			exec! "xcrun", "--show-sdk-path"
+		}
+		if sdk := output.trimSpace; sdk != "" {
+			c.define "CMAKE_OSX_SYSROOT", sdk
+		}
+	}
+	c.configure
+	c.build
+
+	libDir := filepath.join(installDir, "lib")
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(libDir, 0o755)!
+	os.mkdirAll(includeDir, 0o755)!
+
+	// cmake.install panics on failure; copy the files cmake.build produced.
+	libName := "ajantv2"
+	if shared {
+		libName = "ajantv2shared"
+	}
+	copiedLib := false
+	for dir in [filepath.join(buildDir, "ajalibraries", "ajantv2"), filepath.join(installDir, "lib"), filepath.join(buildDir, "lib")] {
+		for name in ["lib"+libName+".a", "lib"+libName+".so", "lib"+libName+".dylib", libName+".lib", "libajantv2.a", "libajantv2.dylib", "libajantv2.so"] {
+			if copyIfExists(filepath.join(dir, name), filepath.join(libDir, name)) {
+				copiedLib = true
+			}
+		}
+		soMatches := filepath.glob(filepath.join(dir, "lib"+libName+".so.*"))!
+		for src in soMatches {
+			copiedLib = copyIfExists(src, filepath.join(libDir, filepath.base(src))) || copiedLib
+		}
+		soMatches = filepath.glob(filepath.join(dir, "libajantv2_*.dylib"))!
+		for src in soMatches {
+			copiedLib = copyIfExists(src, filepath.join(libDir, filepath.base(src))) || copiedLib
+		}
+		soMatches = filepath.glob(filepath.join(dir, "libajantv2_*.so*"))!
+		for src in soMatches {
+			copiedLib = copyIfExists(src, filepath.join(libDir, filepath.base(src))) || copiedLib
+		}
+	}
+	if !copiedLib {
+		panic "ajantv2 library was not produced under ajalibraries/ajantv2"
+	}
+
+	copyTree filepath.join(ctx.SourceDir, "ajalibraries"), filepath.join(includeDir, "ajalibraries")
+	for lib in ["ajaanc", "ajacc", "ajantv2"] {
+		src := filepath.join(ctx.SourceDir, "ajalibraries", lib, "includes")
+		if _, err := os.stat(src); err != nil {
+			if os.isNotExist(err) {
+				continue
+			}
+			panic err
+		}
+		copyTree src, filepath.join(includeDir, lib)
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	installedLibs := os.readDir(libDir)!
+	linkName := libName
+	for entry in installedLibs {
+		name := entry.name
+		if name.hasPrefix("lib") && (name.hasSuffix(".a") || name.hasSuffix(".so") || name.hasSuffix(".dylib")) {
+			linkName = strings.trimSuffix(strings.trimSuffix(strings.trimSuffix(name.trimPrefix("lib"), ".dylib"), ".so"), ".a")
+			if i := strings.index(linkName, ".so"); i >= 0 {
+				linkName = linkName[:i]
+			}
+			break
+		}
+	}
+
+	cflags := [
+		"-I$${includedir}/ajalibraries",
+		"-I$${includedir}/ajalibraries/ajabase",
+		"-I$${includedir}/ajalibraries/ajantv2/includes",
+		"-I$${includedir}/ajalibraries/ajaanc/includes",
+	]
+	if osName == "linux" {
+		cflags <- [
+			"-I$${includedir}/ajalibraries/ajantv2/src/lin",
+			"-I$${includedir}/ajalibraries/ajabase/pnp/linux",
+			"-I$${includedir}/ajalibraries/ajabase/system/linux",
+			"-DAJALinux",
+			"-DAJA_LINUX",
+			"-DNTV2_USE_STDINT",
+		]...
+	} else if osName == "darwin" {
+		cflags <- [
+			"-I$${includedir}/ajalibraries/ajantv2/src/mac",
+			"-I$${includedir}/ajalibraries/ajabase/pnp/mac",
+			"-I$${includedir}/ajalibraries/ajabase/system/mac",
+			"-DAJAMac",
+			"-DAJA_MAC",
+		]...
+	}
+	if shared {
+		if osName == "darwin" {
+			cflags <- ["-DAJADLL", "-DAJA_WINDLL"]...
+		}
+	} else {
+		cflags <- ["-DAJASTATIC"]...
+	}
+
+	libs := "-L$${libdir} -l${linkName}"
+	if osName == "linux" {
+		libs += " -lpthread -lrt"
+		if shared {
+			libs += " -ldl"
+		}
+	} else if osName == "darwin" {
+		libs += " -framework CoreFoundation -framework Foundation -framework IOKit"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: ntv2
+Description: AJA NTV2 SDK
+Version: 16.2
+Libs: ${libs}
+Cflags: ${cflags.join(" ")}
+`
+	os.writeFile(filepath.join(pcDir, "ntv2.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("ntv2")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "ntv2.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("ntv2")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
