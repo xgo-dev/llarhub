@@ -48,36 +48,47 @@ filter => {
 
 onBuild ctx => {
 	installDir := ctx.outputDir
-	includeDir := filepath.join(installDir, "include")
-	libDir := filepath.join(installDir, "lib")
-	os.mkdirAll(includeDir, 0o755)!
-	os.mkdirAll(libDir, 0o755)!
-
 	shared := slices.contains(target.options["shared"], "ON")
 	fPIC := slices.contains(target.options["fPIC"], "ON")
-	obj := filepath.join(ctx.SourceDir, "pdfgen.o")
-	ccArgs := ["-std=c99", "-O3", "-c", filepath.join(ctx.SourceDir, "pdfgen.c"), "-o", obj]
-	if shared || fPIC {
-		ccArgs <- "-fPIC"
-	}
-	cc! ccArgs...
 
+	cflags := "-std=c99 -O3"
+	if shared || fPIC {
+		cflags += " -fPIC"
+	}
+
+	a := autotools.new(ctx.SourceDir, ctx.SourceDir, installDir)
+	builtLib := "libpdfgen.a"
 	if shared {
-		libName := "libpdfgen.so"
+		a.build "pdfgen", "CFLAGS="+cflags, "LDFLAGS=-shared"
+		builtLib = "pdfgen"
+	} else {
+		obj := "pdfgen.o"
+		if slices.contains(target.require["os"], "windows") {
+			obj = "pdfgen.obj"
+		}
+		a.build "libpdfgen.a("+obj+")", "CFLAGS="+cflags
+	}
+
+	includeDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(libDir, 0o755)!
+	os.mkdirAll(licenseDir, 0o755)!
+
+	libName := "libpdfgen.a"
+	if shared {
+		libName = "libpdfgen.so"
 		if slices.contains(target.require["os"], "darwin") {
 			libName = "libpdfgen.dylib"
 		} else if slices.contains(target.require["os"], "windows") {
 			libName = "pdfgen.dll"
 		}
-		cc! "-shared", "-o", filepath.join(libDir, libName), obj
-	} else {
-		ar! "rcs", filepath.join(libDir, "libpdfgen.a"), obj
 	}
-	os.writeFile(filepath.join(includeDir, "pdfgen.h"), os.readFile(filepath.join(ctx.SourceDir, "pdfgen.h"))!, 0o644)!
 
-	licenseDir := filepath.join(installDir, "licenses")
-	os.mkdirAll(licenseDir, 0o755)!
-	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+	cp! filepath.join(ctx.SourceDir, "pdfgen.h"), filepath.join(includeDir, "pdfgen.h")
+	cp! filepath.join(ctx.SourceDir, "LICENSE"), filepath.join(licenseDir, "LICENSE")
+	cp! filepath.join(ctx.SourceDir, builtLib), filepath.join(libDir, libName)
 
 	pcDir := filepath.join(installDir, "lib", "pkgconfig")
 	os.mkdirAll(pcDir, 0o755)!
