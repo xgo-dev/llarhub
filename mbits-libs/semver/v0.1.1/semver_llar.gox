@@ -1,0 +1,123 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <cstdio>
+#include <semver/version.hh>
+#include <string>
+
+int main() {
+  auto const ver_data = std::string{"1.3.0-beta.5+something.mixed.5"};
+  semver::project_version beta5{ver_data};
+
+  auto const ver_data_rc = std::string{"1.3.0-rc"};
+  semver::project_version rc{ver_data_rc};
+
+  char const *verdict = semver::version.compatible_with(beta5) ? "" : "in";
+  printf("Compiled-in version %s is %scompatible with runtime version %s\n",
+         semver::version.to_string().c_str(), verdict,
+         beta5.to_string().c_str());
+
+  verdict = semver::version.compatible_with(semver::get_version()) ? "" : "in";
+  printf("Compiled-in version %s is %scompatible with runtime version %s\n",
+         semver::version.to_string().c_str(), verdict,
+         semver::get_version().to_string().c_str());
+
+  verdict = beta5.compatible_with(rc) ? "" : "in";
+  printf("Compiled-in version %s is %scompatible with runtime version %s\n",
+         beta5.to_string().c_str(), verdict, rc.to_string().c_str());
+
+  verdict = rc.compatible_with(beta5) ? "" : "in";
+  printf("Compiled-in version %s is %scompatible with runtime version %s\n",
+         rc.to_string().c_str(), verdict, beta5.to_string().c_str());
+}
+`
+
+id "mbits-libs/semver"
+
+fromVer "v0.1.1"
+
+defaults {
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "SEMVER_TESTING", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in strings.split(string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!), "\n") {
+		fields := strings.fields(line)
+		if fields.len >= 2 && fields[0] == "VERSION" {
+			version = fields[1]
+			break
+		}
+	}
+	if version == "" {
+		panic "semver CMakeLists.txt has no project version"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: semver
+Description: Semantic Version type for C++17
+Version: ${version}
+Libs: -L$${libdir} -lsemver
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "semver.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("semver")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "semver.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("semver")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
