@@ -1,0 +1,88 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <cstdint>
+#include <string>
+#include "crc32c/crc32c.h"
+
+int main() {
+  const std::uint8_t buffer[4] = {0, 0, 0, 0};
+  std::uint32_t a = crc32c::Crc32c(buffer, sizeof(buffer));
+
+  std::string s;
+  s.resize(4);
+  std::uint32_t b = crc32c::Crc32c(s);
+
+  return (a == b) ? 0 : 1;
+}
+`
+
+id "google/crc32c"
+
+fromVer "1.0.5"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	// crc32c declares cmake_minimum_required(VERSION 3.1); allow CMake 4.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	// Build only the library and its public header; skip the tooling that
+	// pulls in vendored glog/googletest/benchmark subprojects.
+	c.defineBool "CRC32C_BUILD_TESTS", false
+	c.defineBool "CRC32C_BUILD_BENCHMARKS", false
+	c.defineBool "CRC32C_USE_GLOG", false
+	c.defineBool "CRC32C_INSTALL", true
+
+	c.configure
+	c.build
+	c.install
+
+	version := ""
+	for line in strings.split(string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!), "\n") {
+		fields := strings.fields(line)
+		if fields.len >= 3 && fields[0] == "project(Crc32c" && fields[1] == "VERSION" {
+			version = fields[2]
+			break
+		}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: crc32c
+Description: CRC32C implementation
+Version: ${version}
+Libs: -L$${libdir} -lcrc32c
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "crc32c.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("crc32c")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := os.mkdirTemp("", "crc32c-consumer-")!
+	defer os.removeAll(testDir)
+
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+	binary := filepath.join(testDir, "consumer")
+
+	pkgconfig.use installDir
+	args := []string{sourcePath, "-std=c++11"}
+	args <- strings.fields(pkgconfig.lookup("crc32c")!)...
+	args <- []string{"-o", binary}...
+	exec! "c++", args...
+	exec! binary
+}

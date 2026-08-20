@@ -1,0 +1,170 @@
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <stdio.h>
+
+#include "posh.h"
+
+int main(void)
+{
+    printf("%s", POSH_GetArchString());
+    return 0;
+}
+`
+
+id "PhilipLudington/poshlib"
+
+fromVer "v1.3.002"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for value in target.options["shared"] {
+		if value != "ON" && value != "OFF" {
+			return false
+		}
+	}
+	for value in target.options["fPIC"] {
+		if value != "ON" && value != "OFF" {
+			return false
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	// The CCI recipe adds arm64 compiler spellings to the upstream ARM check.
+	headerPath := filepath.join(ctx.SourceDir, "posh.h")
+	header := string(os.readFile(headerPath)!)
+	header = strings.replace(header, "defined _ARM", "defined _ARM || defined __arm64 || defined __arm64__ || defined __aarch64__", 1)
+	os.writeFile(headerPath, []byte(header), 0644)!
+
+	cmakeDir := filepath.join(ctx.SourceDir, "_llar_cmake")
+	os.mkdirAll(cmakeDir, 0755)!
+	cmakeLists := `cmake_minimum_required(VERSION 3.12)
+project(poshlib C)
+
+if(WIN32 AND BUILD_SHARED_LIBS)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
+file(GLOB SRCS_FILES $${POSH_SRC_DIR}/*.c)
+file(GLOB HDRS_FILES $${POSH_SRC_DIR}/*.h)
+
+add_library(posh $${SRCS_FILES})
+target_include_directories(posh PUBLIC $${POSH_SRC_DIR})
+
+include(GNUInstallDirs)
+install(TARGETS posh
+    LIBRARY DESTINATION $${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION $${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION $${CMAKE_INSTALL_BINDIR})
+install(FILES $${HDRS_FILES} DESTINATION $${CMAKE_INSTALL_INCLUDEDIR})
+`
+	os.writeFile(filepath.join(cmakeDir, "CMakeLists.txt"), []byte(cmakeLists), 0644)!
+
+	// These defaults mirror the CCI recipe. Shared builds are already
+	// position-independent, so fPIC only controls static builds.
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	c := cmake.new(cmakeDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "POSH_SRC_DIR", ctx.SourceDir
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0644)!
+
+	osName := runtime.GOOS
+	osValues := target.require["os"]
+	if osValues.len > 0 {
+		osName = osValues[0]
+	}
+	// v1.3.002 installs no pkg-config or CMake package file, so these flags
+	// describe the installed include/lib layout directly.
+	metadata := "-I" + filepath.join(installDir, "include") + " -L" + filepath.join(installDir, "lib") + " -lposh"
+	if shared && osName == "windows" {
+		metadata = "-DPOSH_DLL " + metadata
+	}
+	ctx.setMetadata metadata
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0644)!
+
+	// Rebuild flags from installDir so a cache-hit test does not depend on
+	// onBuild's scratch tree or its metadata output.
+	shared := slices.contains(target.options["shared"], "ON")
+	osName := runtime.GOOS
+	osValues := target.require["os"]
+	if osValues.len > 0 {
+		osName = osValues[0]
+	}
+	binary := filepath.join(testDir, "consumer")
+	if shared && osName == "windows" {
+		args := []string{
+			sourcePath,
+			"-DPOSH_DLL",
+			"-I" + filepath.join(installDir, "include"),
+			"-L" + filepath.join(installDir, "lib"),
+			"-lposh",
+			"-o", binary,
+		}
+		cc! args...
+	} else {
+		args := []string{
+			sourcePath,
+			"-I" + filepath.join(installDir, "include"),
+			"-L" + filepath.join(installDir, "lib"),
+			"-lposh",
+			"-o", binary,
+		}
+		cc! args...
+	}
+
+	if shared {
+		libDir := filepath.join(installDir, "lib")
+		if osName == "windows" {
+			runtimeDir := filepath.join(installDir, "bin")
+			path := runtimeDir
+			if current := os.getenv("PATH"); current != "" {
+				path += ";" + current
+			}
+			os.setenv("PATH", path)!
+		} else {
+			ldPath := libDir
+			if current := os.getenv("LD_LIBRARY_PATH"); current != "" {
+				ldPath += ":" + current
+			}
+			os.setenv("LD_LIBRARY_PATH", ldPath)!
+			dyldPath := libDir
+			if current := os.getenv("DYLD_LIBRARY_PATH"); current != "" {
+				dyldPath += ":" + current
+			}
+			os.setenv("DYLD_LIBRARY_PATH", dyldPath)!
+		}
+	}
+	exec! binary
+}

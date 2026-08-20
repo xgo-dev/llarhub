@@ -1,0 +1,7 @@
+diff --git a/a/CMakeLists.txt b/b/CMakeLists.txt
+index a9d80b9..e0417d7 100644
+--- a/a/CMakeLists.txt
++++ b/b/CMakeLists.txt
+@@ -61,1 +61,1 @@
+-set(dragonbox_include_directory "${CMAKE_INSTALL_INCLUDEDIR}/${dragonbox_directory}")
++set(dragonbox_include_directory "${CMAKE_INSTALL_INCLUDEDIR}")

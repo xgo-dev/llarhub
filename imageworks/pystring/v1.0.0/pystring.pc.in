@@ -1,0 +1,10 @@
+prefix=${pcfiledir}/../..
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: pystring
+Description: Python string methods implemented in C++
+Version: 1.0.0
+Libs: -L${libdir} -lpystring
+Cflags: -I${includedir}
