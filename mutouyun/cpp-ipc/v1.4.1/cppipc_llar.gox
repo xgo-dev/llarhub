@@ -1,0 +1,124 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <cstdlib>
+#include "libipc/ipc.h"
+
+int main() {
+    ipc::channel cc{"my-ipc-channel", ipc::sender | ipc::receiver};
+    return EXIT_SUCCESS;
+}
+`
+
+id "mutouyun/cpp-ipc"
+
+fromVer "v1.4.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	// Upstream hardcodes PIC ON; drop that assignment so the fPIC option
+	// controls CMAKE_POSITION_INDEPENDENT_CODE for static builds.
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(source, "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n", "", 1)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "LIBIPC_BUILD_SHARED_LIBS", shared
+	c.defineBool "LIBIPC_BUILD_TESTS", false
+	c.defineBool "LIBIPC_BUILD_DEMOS", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in strings.split(string(os.readFile(cmakeLists)!), "\n") {
+		if line.hasPrefix("project(cpp-ipc VERSION ") {
+			version = line.trimPrefix("project(cpp-ipc VERSION ").trimSuffix(")")
+			break
+		}
+	}
+	if version == "" {
+		panic "cpp-ipc CMakeLists.txt has no project version"
+	}
+
+	libs := "-L$${libdir} -lipc"
+	if target.require["os"][0] == "linux" {
+		libs += " -lrt -lpthread -lm"
+	}
+	cflags := "-I$${includedir}"
+	if shared {
+		cflags += " -DLIBIPC_LIBRARY_SHARED_USING__"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: ipc
+Description: C++ IPC Library
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "ipc.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("ipc")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "ipc.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("ipc")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
