@@ -1,0 +1,77 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+id "ebiggers/libdeflate"
+
+fromVer "v1.15"
+
+// `shared` selects the installed linkage, while `fPIC` controls position-
+// independent code for the static library through CMake's standard setting.
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "LIBDEFLATE_BUILD_STATIC_LIB", !shared
+	c.defineBool "LIBDEFLATE_BUILD_SHARED_LIB", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "LIBDEFLATE_BUILD_GZIP", false
+	c.defineBool "LIBDEFLATE_BUILD_TESTS", false
+	c.configure
+	c.build
+	c.install
+
+	// Upstream's generated file embeds CMAKE_INSTALL_PREFIX. Keep its
+	// source-defined fields while making the installed metadata relocatable.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "libdeflate.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix="+installDir, `prefix=$${pcfiledir}/../..`, 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libdeflate")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testBuild := filepath.join(ctx.SourceDir, "_consumer_build")
+	os.mkdirAll(testBuild, 0o755)!
+
+	source := ctx.Proj.readFile("v1.15/consumer.c")!
+	consumer := filepath.join(testBuild, "consumer.c")
+	os.writeFile(consumer, source, 0o644)!
+	binary := filepath.join(testBuild, "consumer")
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testBuild, "libdeflate.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libdeflate")!), 0o644)!
+	cc! consumer, "@"+flagsFile, "-o", binary
+
+	exec! {"LD_LIBRARY_PATH": filepath.join(installDir, "lib"), "DYLD_LIBRARY_PATH": filepath.join(installDir, "lib")}, binary
+}
