@@ -1,0 +1,197 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <miniz.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef unsigned char uint8;
+typedef unsigned short uint16;
+typedef unsigned int uint;
+
+// The string to compress.
+static const char *s_pStr = "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson." \
+  "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson." \
+  "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson." \
+  "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson." \
+  "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson." \
+  "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson." \
+  "Good morning Dr. Chandra. This is Hal. I am ready for my first lesson.";
+
+int main(int argc, char *argv[])
+{
+  uint step = 0;
+  int cmp_status;
+  uLong src_len = (uLong)strlen(s_pStr);
+  uLong cmp_len = compressBound(src_len);
+  uLong uncomp_len = src_len;
+  uint8 *pCmp, *pUncomp;
+  uint total_succeeded = 0;
+  (void)argc, (void)argv;
+
+  printf("miniz.c version: %s\n", MZ_VERSION);
+
+  do
+  {
+    // Allocate buffers to hold compressed and uncompressed data.
+    pCmp = (mz_uint8 *)malloc((size_t)cmp_len);
+    pUncomp = (mz_uint8 *)malloc((size_t)src_len);
+    if ((!pCmp) || (!pUncomp))
+    {
+      printf("Out of memory!\n");
+      return EXIT_FAILURE;
+    }
+
+    // Compress the string.
+    cmp_status = compress(pCmp, &cmp_len, (const unsigned char *)s_pStr, src_len);
+    if (cmp_status != Z_OK)
+    {
+      printf("compress() failed!\n");
+      free(pCmp);
+      free(pUncomp);
+      return EXIT_FAILURE;
+    }
+
+    printf("Compressed from %u to %u bytes\n", (mz_uint32)src_len, (mz_uint32)cmp_len);
+
+    if (step)
+    {
+      // Purposely corrupt the compressed data if fuzzy testing (this is a very crude fuzzy test).
+      uint n = 1 + (rand() % 3);
+      while (n--)
+      {
+        uint i = rand() % cmp_len;
+        pCmp[i] ^= (rand() & 0xFF);
+      }
+    }
+
+    // Decompress.
+    cmp_status = uncompress(pUncomp, &uncomp_len, pCmp, cmp_len);
+    total_succeeded += (cmp_status == Z_OK);
+
+    if (step)
+    {
+      printf("Simple fuzzy test: step %u total_succeeded: %u\n", step, total_succeeded);
+    }
+    else
+    {
+      if (cmp_status != Z_OK)
+      {
+        printf("uncompress failed!\n");
+        free(pCmp);
+        free(pUncomp);
+        return EXIT_FAILURE;
+      }
+
+      printf("Decompressed from %u to %u bytes\n", (mz_uint32)cmp_len, (mz_uint32)uncomp_len);
+
+      // Ensure uncompress() returned the expected data.
+      if ((uncomp_len != src_len) || (memcmp(pUncomp, s_pStr, (size_t)src_len)))
+      {
+        printf("Decompression failed!\n");
+        free(pCmp);
+        free(pUncomp);
+        return EXIT_FAILURE;
+      }
+    }
+
+    free(pCmp);
+    free(pUncomp);
+
+    step++;
+
+    // Keep on fuzzy testing if there's a non-empty command line.
+  } while (argc >= 2);
+
+  printf("Success.\n");
+  return EXIT_SUCCESS;
+}
+`
+
+id "richgel999/miniz"
+
+fromVer "3.0.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_DEFAULT_CMP0077", "NEW"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_EXAMPLES", false
+	c.defineBool "BUILD_FUZZERS", false
+	c.defineBool "AMALGAMATE_SOURCES", false
+	c.defineBool "BUILD_HEADER_ONLY", false
+	c.defineBool "INSTALL_PROJECT", true
+	c.defineBool "BUILD_TESTS", false
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	// Upstream miniz.pc.in bakes CMAKE_INSTALL_PREFIX into prefix. Keep the
+	// installed Name/Description/Version/Libs/Cflags, including includedir
+	// under include/miniz, and make only the prefix relocatable.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "miniz.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("miniz")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "miniz.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("miniz")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
