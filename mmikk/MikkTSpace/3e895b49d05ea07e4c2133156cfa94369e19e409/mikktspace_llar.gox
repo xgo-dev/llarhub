@@ -1,0 +1,111 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <mikktspace.h>
+#include <stdlib.h>
+
+static int GetNumFaces(const SMikkTSpaceContext *pContext)
+{
+    return 0;
+}
+
+int main()
+{
+    SMikkTSpaceInterface sInterface = {NULL};
+    sInterface.m_getNumFaces = GetNumFaces;
+
+    SMikkTSpaceContext sContext = {NULL};
+    sContext.m_pInterface = &sInterface;
+
+    genTangSpaceDefault(&sContext);
+
+    return 0;
+}
+`
+
+id "mmikk/MikkTSpace"
+
+fromVer "3e895b49d05ea07e4c2133156cfa94369e19e409"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	cmakeLists := ctx.Proj.readFile("3e895b49d05ea07e4c2133156cfa94369e19e409/CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "MIKKTSPACE_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "mikktspace.h"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: mikktspace
+Description: MikkTSpace tangent-space generation library
+Version: 3e895b49d05ea07e4c2133156cfa94369e19e409
+Libs: -L$${libdir} -lmikktspace -lm
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "mikktspace.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("mikktspace")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+	binary := filepath.join(testDir, "consumer")
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("mikktspace")!
+	flagsFile := filepath.join(testDir, "mikktspace.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	args := []string{sourcePath, "-o", binary, "@" + flagsFile}
+	cc! args...
+
+	shared := target.options["shared"][0] == "ON"
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
