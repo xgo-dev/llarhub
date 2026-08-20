@@ -1,0 +1,20 @@
+import "strings"
+
+// omath tags are mostly v-prefixed releases, plus v5-ci-test and v5.1.0.rcN
+// spellings that are not Go semantic versions. Normalize those so every
+// visible tag stays in the comparator domain and GNU cannot prefer
+// v5-ci-test over a real 5.x release.
+func normalize(version string) string {
+	version = strings.trimPrefix(version, "v")
+	if version == "5-ci-test" {
+		return "v4.99.0"
+	}
+	if i := strings.lastIndex(version, ".rc"); i >= 0 {
+		return "v" + version[:i] + "-" + version[i+1:]
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
