@@ -1,0 +1,141 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <iostream>
+#include "double-conversion/diy-fp.h"
+#include "double-conversion/utils.h"
+#include "double-conversion/ieee.h"
+
+#ifndef UINT64_2PART_C
+#define UINT64_2PART_C(a, b) DOUBLE_CONVERSION_UINT64_2PART_C(a, b)
+#endif
+
+int main() {
+  uint64_t ordered = UINT64_2PART_C(0x01234567, 89ABCDEF);
+  std::cout << "A value: " << double_conversion::Double(ordered).value() << std::endl;
+  return 0;
+}
+`
+
+id "google/double-conversion"
+
+fromVer "v3.3.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	// v3.4.0 declares 3.29 but notes the project likely works with 3.5.
+	// Lower that floor so hosts with CMake 3.5-3.28 can still configure.
+	if source.contains("cmake_minimum_required(VERSION 3.29") {
+		source = source.replace("cmake_minimum_required(VERSION 3.29...4.0.1)", "cmake_minimum_required(VERSION 3.5)", 1)
+		os.writeFile(cmakeLists, []byte(source), 0o644)!
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS", true
+	// v3.3.0 and v3.3.1 declare cmake_minimum_required(VERSION 3.0); CMake 4
+	// rejects that floor unless the policy version is raised.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "double-conversion.pc")
+	if _, err := os.stat(pcPath); os.isNotExist(err) {
+		version := ""
+		for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+			if line.hasPrefix("project(double-conversion VERSION ") {
+				version = line.trimPrefix("project(double-conversion VERSION ").split(")")[0]
+				break
+			}
+		}
+		if version == "" {
+			panic "double-conversion CMakeLists.txt has no project version"
+		}
+		pcDir := filepath.dir(pcPath)
+		os.mkdirAll(pcDir, 0o755)!
+		pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: double-conversion
+Description: Efficient binary-decimal and decimal-binary conversion routines for IEEE doubles
+Version: ` + version + `
+Libs: -L$${libdir} -ldouble-conversion
+Cflags: -I$${includedir}
+`
+		os.writeFile(pcPath, []byte(pc), 0o644)!
+	} else if err != nil {
+		panic err
+	} else {
+		// CMake writes prefix, libdir, and includedir from CMAKE_INSTALL_PREFIX.
+		// Keep the generated flags and make the installed file relocatable.
+		pc := string(os.readFile(pcPath)!)
+		pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+		pc = strings.replace(pc, "exec_prefix="+installDir, "exec_prefix=$${prefix}", 1)
+		pc = strings.replace(pc, "libdir="+filepath.join(installDir, "lib"), "libdir=$${prefix}/lib", 1)
+		pc = strings.replace(pc, "includedir="+filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+		os.writeFile(pcPath, []byte(pc), 0o644)!
+	}
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("double-conversion")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("double-conversion")!
+	flagsFile := filepath.join(testDir, "double-conversion.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", consumer, "-o", binary, "@"+flagsFile
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}

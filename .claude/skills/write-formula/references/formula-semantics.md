@@ -87,15 +87,41 @@ only source-backed flags. Do not force a generator, build type, linkage mode,
 toolchain, policy version, test toggle, or optional feature because another
 Formula used it.
 
+Choose the helper from the selected upstream revision:
+
+- CMake when the source has `CMakeLists.txt`.
+- Autotools when the source has `configure` and/or a Makefile, including
+  Makefile-only trees. Autotools `build`/`install` run `make`/`make install`
+  through execbroker.
+
+Do not invent a `CMakeLists.txt` for a Makefile project. Do not call `cc`,
+`c++`, `gcc`, `clang`, `ar`, `ld`, or equivalent compilers and archivers from
+`onBuild`. Those helpers are the injection point for later LLAR cross-compile
+toolchains and sysroots; a host compiler invoked from the Formula skips that
+path.
+
+Keep the Autotools helper for Makefile projects even when the default target
+is a test program or there is no `install` rule. Do not invent a replacement
+Makefile. Call `a.build` with the existing Makefile's compile targets and
+make variables such as `CFLAGS=`; skip `a.configure` when there is no
+configure script. If there is no `install` target, copy the files make
+produced into the output directory instead of calling `a.install`.
+
+`onTest` may compile a consumer with `cc!` or `c++!` against the installed
+pkg-config flags. That is the only Formula hook where a naked compiler is
+allowed.
+
 Expose dependency install roots through the active helper or context contract.
 Install the complete public result into the current module's output directory.
 Do not depend on a build scratch path after the build callback returns.
 
-For an unsupported build system, use gsh commands with separate arguments and
-explicit failure propagation. Call active CMake or Autotools helper methods
-according to their real return contract; do not add `!` to a void helper that
-already panics on failure. Add a shell only when the verified upstream step
-requires shell grammar.
+For an unsupported build system that is not CMake or Make, use gsh commands
+with separate arguments and explicit failure propagation. Still do not invoke
+a C/C++ compiler from `onBuild` when a Makefile plus the Autotools helper can
+own the compile. Call active CMake or Autotools helper methods according to
+their real return contract; do not add `!` to a void helper that already
+panics on failure. Add a shell only when the verified upstream step requires
+shell grammar.
 
 ## Metadata
 
