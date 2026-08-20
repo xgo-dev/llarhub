@@ -54,9 +54,12 @@ documentation as a substitute for that source.
 
 Choose the narrowest owner for each operation:
 
-- Use LLAR's CMake or Autotools helper for behavior it already owns.
+- Use LLAR's CMake or Autotools helper for compile, archive, link, and
+  install. Those helpers run `cmake`/`configure`/`make` through LLAR's
+  execbroker so a later cross-compile toolchain and sysroot can be injected.
 - Use the inherited gsh surface for external commands, command environment,
-  captured output, and command status.
+  captured output, and command status. Do not use gsh `cc`, `c++`, `ar`, or
+  `ld` from `onBuild` as a substitute for a helper.
 - Use XGo collection, string, lambda, property, command-call, and error-wrap
   forms for Formula logic when the active ixgo accepts them.
 - Use Go standard-library packages through their XGo surface for structured
@@ -101,6 +104,21 @@ LLAR's configured streams, working directory, and execution path.
   fragment, or a libs-only query, for the complete result.
 - Keep consumer tests independent of the build scratch tree so they can run on
   a cache hit.
+- In `onBuild`, compile and install C/C++ packages only through the LLAR
+  CMake or Autotools helper. Do not call `cc`, `c++`, `gcc`, `clang`, `ar`,
+  `ld`, or equivalent compilers and archivers from `onBuild`. Naked compiler
+  invocations skip execbroker and block later LLAR cross-compile injection.
+- Match the helper to upstream: CMake when the selected revision has
+  `CMakeLists.txt`; Autotools when it has `configure` and/or a Makefile. Do
+  not invent a `CMakeLists.txt` or a replacement Makefile. Drive the
+  existing Makefile with `a.build` and `a.install`, passing make variables
+  such as `CFLAGS=` and explicit targets when the default target is tests.
+  Skip `a.configure` when there is no configure script. If the Makefile has
+  no `install` target, still compile through `a.build`, then copy the files
+  make produced into the output directory.
+- `onTest` may compile the consumer with `cc!` or `c++!` against installed
+  pkg-config flags. That is the only Formula hook where a naked compiler is
+  allowed.
 - Do not add compatibility paths, fallback behavior, flags, generators,
   options, abstractions, or helpers without evidence that the current Formula
   needs them.
