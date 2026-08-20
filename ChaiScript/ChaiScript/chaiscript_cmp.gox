@@ -1,0 +1,26 @@
+import "strings"
+
+// Stable releases use v-prefixed semantic versions, while the repository
+// also keeps Release-* aliases and two named snapshots. The snapshots are
+// mapped to their source-tree release lines so every visible tag is accepted
+// without letting the WebAssembly-only snapshot become the default native
+// build.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "Release-") {
+		return "v" + strings.trimPrefix(version, "Release-")
+	}
+	if version == "Test_Release" {
+		return "v5.7.2"
+	}
+	if version == "wasm-latest" {
+		// wasm-latest is a v7.0.0 source snapshot, but it is not a native
+		// release; keep it below v6.1.0 so native default selection remains
+		// usable while the tag stays in the comparator's domain.
+		return "v6.1.0-0"
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}

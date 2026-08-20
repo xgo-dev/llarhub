@@ -1,0 +1,132 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include "heatshrink_encoder.h"
+
+int main() {
+#if HEATSHRINK_DYNAMIC_ALLOC
+    heatshrink_encoder *hse = heatshrink_encoder_alloc(8, 7);
+    heatshrink_encoder_reset(hse);
+    heatshrink_encoder_free(hse);
+#else
+    heatshrink_encoder hse;
+    heatshrink_encoder_reset(&hse);
+#endif
+
+    return 0;
+}
+`
+
+id "atomicobject/heatshrink"
+
+fromVer "v0.3.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"dynamic_alloc": "ON",
+	"debug_log": "OFF",
+	"use_index": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "dynamic_alloc" && name != "debug_log" && name != "use_index" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	cmakeLists := ctx.Proj.readFile("CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	configPath := filepath.join(ctx.SourceDir, "heatshrink_config.h")
+	config := string(os.readFile(configPath)!)
+	if slices.contains(target.options["dynamic_alloc"], "OFF") {
+		config = strings.replace(config, "#define HEATSHRINK_DYNAMIC_ALLOC 1", "#define HEATSHRINK_DYNAMIC_ALLOC 0", 1)
+	}
+	if slices.contains(target.options["debug_log"], "ON") {
+		config = strings.replace(config, "#define HEATSHRINK_DEBUGGING_LOGS 0", "#define HEATSHRINK_DEBUGGING_LOGS 1", 1)
+	}
+	if slices.contains(target.options["use_index"], "OFF") {
+		config = strings.replace(config, "#define HEATSHRINK_USE_INDEX 1", "#define HEATSHRINK_USE_INDEX 0", 1)
+	}
+	os.writeFile(configPath, []byte(config), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "HEATSHRINK_SRC_DIR", ctx.SourceDir
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), license, 0o644)!
+
+	version := ""
+	common := string(os.readFile(filepath.join(ctx.SourceDir, "heatshrink_common.h"))!)
+	for line in common.split("\n") {
+		if line.hasPrefix("/* Version ") {
+			version = line.trimSpace.trimPrefix("/* Version ").trimSuffix(" */")
+			break
+		}
+	}
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: heatshrink
+Description: data compression/decompression library for embedded/real-time systems
+Version: @VERSION@
+Libs: -L$${libdir} -lheatshrink
+Cflags: -I$${includedir}
+`
+	pc = strings.replace(pc, "@VERSION@", version, 1)
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	os.writeFile(filepath.join(pcDir, "heatshrink.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("heatshrink")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("heatshrink")!
+	flagsFile := filepath.join(testDir, "heatshrink.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c99", consumer, "@"+flagsFile, "-o", binary
+
+	os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	exec! binary
+}

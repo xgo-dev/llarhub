@@ -1,0 +1,74 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+id "iboB/picobench"
+
+fromVer "v2.00"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	// LLAR's shallow tag checkout records the selected annotated tag only in
+	// FETCH_HEAD, without creating refs/tags for git describe.
+	fetchHead := string(os.readFile(filepath.join(ctx.SourceDir, ".git", "FETCH_HEAD"))!)
+	version := fetchHead.splitN("'", 3)[1][1:]
+
+	// Upstream has no install rules. Carry the Conan recipe's header installer
+	// with context shared by every supported upstream tag.
+	patch := ctx.Proj.readFile("v2.00/install.patch")!
+	patchPath := filepath.join(ctx.SourceDir, "_llar_install.patch")
+	os.writeFile(patchPath, patch, 0o644)!
+	git! "-C", ctx.SourceDir, "apply", "--unidiff-zero", patchPath
+
+	c := cmake.new(ctx.SourceDir, ctx.SourceDir+"/_build", installDir)
+	// The selected Conan recipe sets this for pre-v2.06 tags whose declared
+	// CMake compatibility floor is lower than CMake 4 accepts by default.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "PICOBENCH_BUILD_TOOLS", false
+	c.defineBool "PICOBENCH_BUILD_TESTS", false
+	c.defineBool "PICOBENCH_BUILD_EXAMPLES", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), license, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+
+Name: picobench
+Description: A micro microbenchmarking library in a single header file
+Version: ` + version + `
+Libs: -lpthread
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "picobench.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("picobench")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	source := ctx.Proj.readFile("v2.00/consumer.cpp")!
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, source, 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("picobench")!
+	flagsFile := filepath.join(testDir, "picobench.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", "@"+flagsFile, consumer, "-o", binary
+	exec! binary
+}

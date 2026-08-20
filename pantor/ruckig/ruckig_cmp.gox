@@ -1,0 +1,4 @@
+compareVer (a, b) => {
+	// ruckig publishes semver tags like "v0.17.3".
+	return semver.compare(a.Version, b.Version)
+}

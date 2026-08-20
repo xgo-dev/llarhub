@@ -1,0 +1,152 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include "atomic_ops_stack.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+AO_t globalElement;
+
+AO_stack_t globalStack = AO_STACK_INITIALIZER;
+
+typedef struct {
+    AO_t head;
+    unsigned val;
+} my_stack_t;
+
+int main(void)
+{
+    AO_store_full(&globalElement, 1337);
+    {
+        AO_t val = AO_load_full(&globalElement);
+        if (val != 1337) {
+            fprintf(stderr, "Unexpected element after store/load: %u\n", (unsigned) val);
+            return EXIT_FAILURE;
+        }
+    }
+
+    {
+        my_stack_t *newElem = (my_stack_t *) malloc(sizeof(my_stack_t));
+        newElem->val = 4242;
+        AO_stack_push_release(&globalStack, &newElem->head);
+    }
+    {
+        my_stack_t *newElem = (my_stack_t *) malloc(sizeof(my_stack_t));
+        newElem->val = 8484;
+        AO_stack_push_release(&globalStack, &newElem->head);
+    }
+
+    {
+        my_stack_t *fetchElement = (my_stack_t *) AO_stack_pop_acquire(&globalStack);
+        if (fetchElement->val != 8484) {
+            fprintf(stderr, "Unexpected element from stack: %u\n", (unsigned) fetchElement->val);
+            return EXIT_FAILURE;
+        }
+        free(fetchElement);
+    }
+    {
+        my_stack_t *fetchElement = (my_stack_t *) AO_stack_pop_acquire(&globalStack);
+        if (fetchElement->val != 4242) {
+            fprintf(stderr, "Unexpected element from stack: %u\n", (unsigned) fetchElement->val);
+            return EXIT_FAILURE;
+        }
+        free(fetchElement);
+    }
+    return EXIT_SUCCESS;
+}
+`
+
+id "bdwgc/libatomic_ops"
+
+fromVer "v7.8.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"assertions": "OFF",
+	"atomic_intrinsics": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "assertions" && name != "atomic_intrinsics" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	assertions := target.options["assertions"][0] == "ON"
+	atomicIntrinsics := target.options["atomic_intrinsics"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "AO_BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "enable_assertions", assertions
+	c.defineBool "enable_atomic_intrinsics", atomicIntrinsics
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "enable_gpl", true
+	c.defineBool "install_headers", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	for name in []string{"LICENSE", "COPYING"} {
+		license := os.readFile(filepath.join(ctx.SourceDir, name))!
+		os.writeFile(filepath.join(licenseDir, name), license, 0o644)!
+	}
+
+	// CMake writes the upstream pkg-config file with the build prefix. Keep
+	// its verified flags while making the installed package relocatable and
+	// exposing the GPL extension's transitive core-library dependency.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "atomic_ops.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+	pc = strings.replace(pc, "libdir="+filepath.join(installDir, "lib"), "libdir=$${prefix}/lib", 1)
+	pc = strings.replace(pc, "includedir="+filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+	pc = strings.replace(pc, "Libs: -L$${libdir} -latomic_ops", "Libs: -L$${libdir} -latomic_ops_gpl -latomic_ops", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("atomic_ops")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("atomic_ops")!
+	flagsFile := filepath.join(testDir, "atomic_ops.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
