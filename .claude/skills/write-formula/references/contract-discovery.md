@@ -29,6 +29,7 @@ rg -n 'RegisterProject|_llar\.gox|ModuleF' .
 rg -n 'type ModuleF|func \([^)]*\*ModuleF\)' . -g '*.go'
 rg -n 'type Context|func \([^)]*\*Context\)' . -g '*.go'
 rg -n 'type Project|func \([^)]*\*Project\)' . -g '*.go'
+rg -n 'func \(.*\) Target|func \(.*\) Version|func \(.*\) Require|func \(.*\) Options' . -g '*.go'
 ```
 
 Read the complete declarations found by these searches. Establish:
@@ -36,7 +37,8 @@ Read the complete declarations found by these searches. Establish:
 - the `_llar.gox` project base class and automatic imports;
 - the generated entry contract;
 - each top-level Formula method and callback signature;
-- promoted fields and methods available inside callbacks;
+- promoted fields and methods available inside callbacks, including
+  `target.require`, `target.options`, and `target.version` when present;
 - the ownership and error behavior of source, build, and test context values.
 
 Also locate the Formula and comparator selection code. Confirm suffix matching,

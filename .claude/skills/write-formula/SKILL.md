@@ -121,6 +121,13 @@ LLAR's configured streams, working directory, and execution path.
 - `onTest` may compile the consumer with `cc!` or `c++!` against installed
   pkg-config flags. That is the only Formula hook where a naked compiler is
   allowed.
+- Do not use `runtime.GOOS`, `runtime.GOARCH`, or other host-process platform
+  APIs to decide Formula behavior. Read the selected platform from
+  `target.require["os"]` and `target.require["arch"]`. Do not fall back to
+  the host when those keys are empty; missing require is a matrix failure.
+- When the resolved LLAR revision exposes `target.version`, that is the
+  original version or ref selected for this build. Use it when the Formula
+  must know the selected tag. Do not confuse it with `fromVer`.
 - Do not add compatibility paths, fallback behavior, flags, generators,
   options, abstractions, or helpers without evidence that the current Formula
   needs them.
