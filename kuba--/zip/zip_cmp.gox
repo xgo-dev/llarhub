@@ -1,0 +1,16 @@
+import "strings"
+
+// GNU ordering treats v0.3.9 as newer than v0.3.15 and ranks +miniz
+// metadata tags after the matching numeric release. Compare the v-stripped
+// numeric semver before '+' so the complete tag set stays in release order.
+func numericSemver(version string) string {
+	version = strings.trimPrefix(version, "v")
+	if i := strings.indexByte(version, '+'); i >= 0 {
+		version = version[:i]
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(numericSemver(a.Version), numericSemver(b.Version))
+}

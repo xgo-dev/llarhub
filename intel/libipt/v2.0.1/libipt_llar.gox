@@ -1,0 +1,112 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <intel-pt.h>
+
+int main() {
+    pt_config cfg;
+    pt_config_init(&cfg);
+    return 0;
+}
+`
+
+id "intel/libipt"
+
+fromVer "v2.0.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := map[string]string{}
+	for line in strings.split(string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!), "\n") {
+		fields := strings.fields(line)
+		if fields.len == 2 {
+			name := strings.trimSuffix(fields[0], "(")
+			value := strings.trimSuffix(fields[1], ")")
+			if name == "set(PT_VERSION_MAJOR" || name == "set(PT_VERSION_MINOR" || name == "set(PT_VERSION_PATCH" {
+				version[name] = value
+			}
+		}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	major := version["set(PT_VERSION_MAJOR"]
+	minor := version["set(PT_VERSION_MINOR"]
+	patch := version["set(PT_VERSION_PATCH"]
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: libipt
+Description: Intel Processor Trace library
+` + "Version: ${major}.${minor}.${patch}\n" + `
+Libs: -L$${libdir} -lipt
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "libipt.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libipt")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := os.mkdirTemp("", "libipt-consumer-")!
+	defer os.removeAll(testDir)
+
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+	binary := filepath.join(testDir, "consumer")
+
+	pkgconfig.use installDir
+	args := []string{sourcePath, "-std=c++11"}
+	flags := strings.replaceAll(pkgconfig.lookup("libipt")!, "\\|", "|")
+	args <- strings.fields(flags)...
+	args <- []string{"-o", binary}...
+	exec! "c++", args...
+
+	if slices.contains(target.options["shared"], "ON") {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}

@@ -5,7 +5,7 @@ description: Write, update, register, configure, implement, or debug generic XGo
 
 # Write XGo Classfiles
 
-Treat XGo as a superset of Go. Use ordinary Go syntax whenever it is clear, then use XGo conveniences and classfile generation deliberately. Keep language syntax, classfile-to-Go transformation, and framework APIs conceptually separate.
+Treat XGo as a superset of Go. In XGo source, prefer verified XGo syntax when it removes boilerplate without hiding semantics; use ordinary Go syntax when it is clearer or when the active toolchain rejects the XGo form. Do not introduce helpers or abstractions merely to force syntax sugar. Keep language syntax, classfile-to-Go transformation, and framework APIs conceptually separate.
 
 Use the official [XGo language guide](https://github.com/goplus/xgo/blob/main/doc/docs.md) and [classfile guide](https://github.com/goplus/xgo/blob/main/doc/classfile.md) for general syntax. Use the target project's XGo, `gogen`, and `github.com/goplus/mod` versions when implementation details matter.
 

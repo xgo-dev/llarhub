@@ -1,0 +1,12 @@
+import "strings"
+
+// GNU ordering treats v0.9.9 as newer than v0.11.0 because it compares the
+// first numeric run after "v0." as 9 vs 1. Strip the common v prefix so
+// semver.Compare can order the complete tag set.
+func normalize(version string) string {
+	return "v" + strings.trimPrefix(version, "v")
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}

@@ -1,0 +1,117 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <cstdlib>
+#include "datetime/datetime.h"
+
+int main() {
+    jed_utils::datetime date1(2025, 1, 2);
+    return EXIT_SUCCESS;
+}
+`
+
+id "jeremydumais/CPP-DateTime-library"
+
+fromVer "v1.0.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	version := ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!).split("\n") {
+		trimmed := line.trimSpace
+		if trimmed.hasPrefix("set(PROJECT_VERSION \"") {
+			version = trimmed.trimPrefix("set(PROJECT_VERSION \"").trimSuffix("\")")
+			break
+		}
+	}
+	if version == "" {
+		panic "datetime CMakeLists.txt has no PROJECT_VERSION"
+	}
+
+	libs := "-L$${libdir} -ldatetime"
+	if slices.contains(target.require["os"], "linux") {
+		libs += " -lm -lpthread -ldl"
+	}
+	cflags := "-I$${includedir}"
+	if !shared {
+		cflags += " -DDATETIME_STATIC"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib/datetime
+includedir=$${prefix}/include
+
+Name: datetime
+Description: A simple Date and time library built in C++
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "datetime.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("datetime")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "datetime.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("datetime")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++14", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		libDir := filepath.join(installDir, "lib", "datetime")
+		os.setenv("LD_LIBRARY_PATH", libDir)!
+		os.setenv("DYLD_LIBRARY_PATH", libDir)!
+	}
+	exec! binary
+}

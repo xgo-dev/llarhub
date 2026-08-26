@@ -1,0 +1,123 @@
+import (
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+)
+
+const consumerSource = `#include <aws/common/common.h>
+
+int main(void) {
+    aws_common_library_init(aws_default_allocator());
+    aws_common_library_clean_up();
+    return 0;
+}
+`
+
+id "awslabs/aws-c-common"
+
+fromVer "v0.11.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"cpu_extensions": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "cpu_extensions" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	cpuExtensions := target.options["cpu_extensions"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "AWS_ENABLE_LTO", false
+	c.defineBool "AWS_WARNINGS_ARE_ERRORS", false
+	c.defineBool "USE_CPU_EXTENSIONS", cpuExtensions
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	// LLAR's shallow tag checkout records the selected annotated tag only in
+	// FETCH_HEAD, without creating refs/tags for git describe.
+	fetchHead := string(os.readFile(filepath.join(ctx.SourceDir, ".git", "FETCH_HEAD"))!)
+	version := fetchHead.splitN("'", 3)[1][1:]
+
+	osName := runtime.GOOS
+	if osValues := target.require["os"]; osValues.len > 0 {
+		osName = osValues[0]
+	}
+	libs := "-L$${libdir} -laws-c-common"
+	if osName == "linux" {
+		libs += " -ldl -lm -lpthread -lrt"
+	} else if osName == "darwin" && !shared {
+		libs += " -framework CoreFoundation"
+	}
+
+	cflags := "-I$${includedir}"
+	if shared {
+		cflags += " -DAWS_COMMON_USE_IMPORT_EXPORT"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: aws-c-common
+Description: Core c99 package for AWS SDK for C
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "aws-c-common.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("aws-c-common")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "aws-c-common.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("aws-c-common")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}

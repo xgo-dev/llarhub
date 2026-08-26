@@ -1,0 +1,73 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <glm/glm.hpp>
+
+int main() {
+    glm::vec3 v(1, 2, 3);
+    return glm::length(v) > 0 ? 0 : 1;
+}
+`
+
+id "g-truc/glm"
+
+fromVer "1.0.1"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "GLM_BUILD_LIBRARY", false
+	c.defineBool "GLM_BUILD_TESTS", false
+	c.defineBool "GLM_BUILD_INSTALL", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "copying.txt"), os.readFile(filepath.join(ctx.SourceDir, "copying.txt"))!, 0o644)!
+
+	// LLAR's shallow tag checkout records the selected annotated tag only in
+	// FETCH_HEAD, without creating refs/tags for git describe.
+	fetchHead := string(os.readFile(filepath.join(ctx.SourceDir, ".git", "FETCH_HEAD"))!)
+	version := fetchHead.splitN("'", 3)[1]
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: glm
+Description: OpenGL Mathematics (GLM)
+Version: ` + version + `
+Libs:
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "glm.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("glm")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "glm.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("glm")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}

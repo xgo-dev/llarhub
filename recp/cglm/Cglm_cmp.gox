@@ -1,0 +1,20 @@
+import "strings"
+
+// cglm's upstream tags are almost all v-prefixed (v0.1.0 .. v0.9.6), but one
+// early tag ships without the prefix (0.3.0 alongside v0.3.0). The default
+// GNU comparator orders the two spellings inconsistently at that border, so a
+// custom comparator normalizes the prefix before comparing.
+//
+// Normalizing to a canonical v-prefixed form makes the bare 0.3.0 order
+// exactly like v0.3.0 and lets semver order the whole tag set, which is valid
+// Go semantic-version syntax once the prefix is present.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}

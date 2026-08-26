@@ -1,0 +1,83 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <crossdb.h>
+
+int main(void) {
+	xdb_conn_t *conn = xdb_open(":memory:");
+	if (conn) {
+		xdb_close(conn);
+	}
+	return 0;
+}
+`
+
+id "crossdb-org/crossdb"
+
+fromVer "0.11.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	// 0.11.0 declares cmake_minimum_required(VERSION 2.8.3); CMake 4 needs this floor.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	// 0.11.0 hardcodes SHARED; 0.12.0+ expose BUILD_SHARED_LIBS (default ON).
+	c.defineBool "BUILD_SHARED_LIBS", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	// Shallow checkouts have no local tags; FETCH_HEAD records the requested tag.
+	fetchHead := string(os.readFile(filepath.join(ctx.SourceDir, ".git", "FETCH_HEAD"))!)
+	version := fetchHead.splitN("'", 3)[1]
+
+	libs := "-L$${libdir} -lcrossdb"
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs += " -lpthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: crossdb
+Description: Ultra High-performance Lightweight Embedded and Server OLTP RDBMS
+Version: ` + version + `
+Libs: ` + libs + `
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "crossdb.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("crossdb")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "crossdb.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("crossdb")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	libDir := filepath.join(installDir, "lib")
+	exec! {"LD_LIBRARY_PATH": libDir, "DYLD_LIBRARY_PATH": libDir}, binary
+}

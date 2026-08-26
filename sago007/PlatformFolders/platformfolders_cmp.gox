@@ -1,0 +1,17 @@
+import "strings"
+
+// Upstream tags mix an early v-prefixed release (v1.0) with later unprefixed
+// tags (2.0 .. 4.3.0). GNU version order treats v1.0 as newer than 4.3.0
+// because "v" sorts after digits, so a custom comparator prepends a missing
+// v and then uses semantic comparison. That keeps every visible tag in the
+// comparator's domain and orders v1.0 < 2.0 < ... < 4.3.0.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}

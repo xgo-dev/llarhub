@@ -1,0 +1,145 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <flecs.h>
+
+#include <stdio.h>
+
+typedef struct {
+    float x;
+    float y;
+} Position;
+
+int main() {
+    ecs_world_t *world = ecs_init();
+
+    ECS_COMPONENT(world, Position);
+    ecs_entity_t e = ecs_new(world);
+    ecs_set(world, e, Position, {10.0f, 20.0f});
+
+    const char *name = ecs_get_name(world, e);
+    const Position *p = ecs_get(world, e, Position);
+    printf("Position of %s is {%f, %f}\n", name, p->x, p->y);
+
+    return 0;
+}
+`
+
+id "SanderMertens/flecs"
+
+fromVer "v4.0.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "FLECS_STATIC", !shared
+	c.defineBool "FLECS_SHARED", shared
+	c.defineBool "FLECS_TESTS", false
+	c.defineBool "FLECS_PIC", fPIC
+	c.configure
+	c.build
+	c.install
+
+	os.removeAll(filepath.join(installDir, "lib", "cmake"))!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	major, minor, patch := "", "", ""
+	for line in string(os.readFile(filepath.join(ctx.SourceDir, "include", "flecs.h"))!).split("\n") {
+		fields := line.trimSpace.split(" ")
+		if fields.len >= 3 && fields[0] == "#define" {
+			if fields[1] == "FLECS_VERSION_MAJOR" {
+				major = fields[2]
+			} else if fields[1] == "FLECS_VERSION_MINOR" {
+				minor = fields[2]
+			} else if fields[1] == "FLECS_VERSION_PATCH" {
+				patch = fields[2]
+			}
+		}
+	}
+	if major == "" || minor == "" || patch == "" {
+		panic "flecs.h has no FLECS_VERSION macros"
+	}
+
+	library := "flecs"
+	cflags := "-I$${includedir}"
+	if !shared {
+		library = "flecs_static"
+		cflags += " -Dflecs_STATIC"
+	}
+	libs := "-L$${libdir} -l" + library
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs += " -lpthread"
+	} else if slices.contains(target.require["os"], "windows") {
+		libs += " -lwsock32 -lws2_32"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: flecs
+Description: A fast entity component system (ECS) for C & C++
+Version: ` + major + "." + minor + "." + patch + `
+Libs: ` + libs + `
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "flecs.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("flecs")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "flecs.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("flecs")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}

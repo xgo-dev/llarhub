@@ -1,0 +1,123 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include "hwy/aligned_allocator.h"
+#include "hwy/targets.h"
+
+int main() {
+    auto p = hwy::AllocateAligned<float>(8);
+    if (p.get() == nullptr) {
+        return 1;
+    }
+    p[0] = 1.0f;
+    return hwy::SupportedTargets() == 0;
+}
+`
+
+id "google/highway"
+
+fromVer "1.4.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"with_test": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "with_test" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	withTest := target.options["with_test"][0] == "ON"
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(source, "    set(CMAKE_POSITION_INDEPENDENT_CODE TRUE)\n", "", 1)
+	source = strings.replace(source, "set_property(TARGET hwy PROPERTY POSITION_INDEPENDENT_CODE ON)\n", "", 1)
+	source = strings.replace(source, "set_property(TARGET hwy_contrib PROPERTY POSITION_INDEPENDENT_CODE ON)\n", "", 1)
+	source = strings.replace(source, "set_property(TARGET hwy_test PROPERTY POSITION_INDEPENDENT_CODE ON)\n", "", 1)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "HWY_ENABLE_EXAMPLES", false
+	c.defineBool "HWY_ENABLE_TESTS", withTest
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	for name in ["libhwy.pc", "libhwy-contrib.pc", "libhwy-test.pc"] {
+		pcPath := filepath.join(installDir, "lib", "pkgconfig", name)
+		if _, err := os.stat(pcPath); err != nil {
+			if os.isNotExist(err) {
+				continue
+			}
+			panic err
+		}
+		pc := string(os.readFile(pcPath)!)
+		pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+		pc = strings.replace(pc, "exec_prefix="+installDir, "exec_prefix=$${prefix}", 1)
+		pc = strings.replace(pc, "libdir="+filepath.join(installDir, "lib"), "libdir=$${prefix}/lib", 1)
+		pc = strings.replace(pc, "includedir="+filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+		if slices.contains(target.require["os"], "linux") {
+			lines := pc.split("\n")
+			for i, line in lines {
+				if line.hasPrefix("Libs:") && !strings.contains(line, " -lm") {
+					lines[i] = line + " -lm"
+				}
+			}
+			pc = strings.join(lines, "\n")
+		}
+		os.writeFile(pcPath, []byte(pc), 0o644)!
+	}
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libhwy")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libhwy.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libhwy")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "@"+flagsFile, "-o", binary
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}

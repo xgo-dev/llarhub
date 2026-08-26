@@ -1,0 +1,15 @@
+import "strings"
+
+// Upstream tags are unprefixed semantic versions (0.1.0 .. 0.14.0). GNU
+// comparison can invert that sequence (0.9.0 vs 0.14.0). Prefix v so every
+// tag is valid Go semver and semver.Compare orders the complete set.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}

@@ -1,124 +1,153 @@
 ---
 name: write-formula
-description: Create, migrate, review, debug, and validate LLAR formulas and module entries, including versions.json, _llar.gox build classfiles, _cmp.gox comparators, dependency discovery, build matrices, CMake and Autotools recipes, gsh commands, metadata, and onTest consumer checks. Use when adding a library to an LLAR formula store, changing an existing formula, porting legacy Formula hooks, or fixing formula selection, parsing, dependency, build, matrix, cache, command, metadata, or test failures.
+description: Use when creating, migrating, reviewing, debugging, or validating LLAR Formula modules in llarhub or another Formula store, including versions.json, _llar.gox recipes, _cmp.gox comparators, dependency discovery, build matrices, gsh commands, CMake and Autotools builds, metadata, and consumer tests.
 ---
 
 # Write LLAR Formulas
 
-## Required Reading
+Treat a Formula as an XGo classfile that composes LLAR's Formula contract with
+the gsh execution surface. Write idiomatic XGo/gsh source, not Go code with a
+`.gox` suffix. Use the simplest verified XGo/gsh form that preserves the
+required semantics.
 
-Read both references completely before creating or editing a Formula:
+## Establish The Contract
 
-1. [XGo Classfile](references/xgo-classfile/SKILL.md) for XGo syntax,
-   classfile generation, promoted base APIs, auto-properties, overloads, and
-   generated-name conventions.
-2. [LLAR Formula](references/llar-formula.md) for the current Formula contract,
-   lifecycle, APIs, build helpers, commands, metadata, and validation rules.
+Before interpreting or editing a Formula:
 
-Treat the LLAR Formula reference as the default contract. If the task targets a
-different LLAR revision, inspect that revision's `formula/`, `x/cmake/`,
-`x/autotools/`, `internal/modules/`, `internal/build/`, and
-`internal/ixgo/classfile.go` before using a changed API. Never infer an API from
-an old Formula or wiki example.
+1. Read [Contract Discovery](references/contract-discovery.md) completely and
+   resolve the exact LLAR revision used by the target Formula store.
+2. Read [XGo And Gsh Style](references/xgo-gsh-style.md) completely. In
+   llarhub, read `.github/scripts/find_changed_modules.gsh` when it exists in
+   the target revision and use it as the repository's executable style sample.
+3. Read [Formula Semantics](references/formula-semantics.md) completely for the
+   source investigation, dependency, build, metadata, and test workflow.
+
+The resolved LLAR source is the Formula API contract. Do not treat this skill,
+an old Formula, generated Go names, a wiki page, or the latest standalone XGo
+documentation as a substitute for that source.
 
 ## Workflow
 
-1. Confirm the upstream `<owner>/<repo>` module id and exact source tag. Keep
-   the tag spelling unchanged, including a leading `v` or other prefix.
-2. Inspect that exact source revision. Read its build entrypoint, dependency
-   declarations or lock files, install rules, generated package metadata, and
-   consumer tests before choosing any flag, dependency, output, or test.
-3. Inspect the module's current `versions.json`, every Formula threshold, and
-   its optional comparator. Determine which Formula must change or whether a
-   new `fromVer` boundary is required.
-4. Model direct dependencies for the whole Formula range. Prefer `onRequire`
-   to read the requested tag's upstream dependency declarations so dependency
-   changes inside the range do not require repeated Formula edits. Use
-   `versions.json` only as a conservative, range-compatible fallback; it does
-   not need to be the newest dependency version.
-5. Model only build choices that affect dependency resolution, commands,
-   installed output, metadata, tests, or support. Put environment dimensions
-   under `target.require` and package-owned choices under `target.options`.
-6. Implement the smallest source-backed recipe. Prefer LLAR's CMake or
-   Autotools helper when it matches the source build; use gsh commands for
-   unsupported build systems or extra verified steps.
-7. Set metadata from the installed consumer interface. Add `onTest` when a
-   small consumer can compile, link, load, or run solely from the source tree,
-   installed output, and declared dependencies.
-8. Run `llar test` at the affected `fromVer` boundary and representative exact
-   versions across the served range, especially versions whose upstream
-   dependencies differ. Test defaults and every affected matrix selection.
-   Exercise both a fresh build and a cache hit when `onTest` exists.
+1. Confirm the target Formula store, the LLAR revision its CI executes, and the
+   exact upstream `<owner>/<repo>` tag requested by the user.
+2. Inspect that upstream revision's build entrypoint, dependency declarations,
+   install rules, package metadata, patches, and consumer tests. Do not infer a
+   flag, dependency, output, or compatibility branch.
+3. Enumerate the complete upstream tag set visible to LLAR. Inspect
+   `versions.json`, all existing Formula thresholds, and the optional
+   comparator. Set `fromVer` to the lowest upstream version proved compatible
+   with the Formula; do not default it to the requested or newest version.
+4. Resolve the active `_llar.gox` class registration, promoted base APIs,
+   callback signatures, automatic imports, build helpers, and gsh/XGo versions
+   from the selected LLAR revision.
+5. Implement the smallest Formula that preserves the verified installed
+   consumer interface. Prefer the LLAR build-system helper matching upstream;
+   use inherited gsh commands for verified steps the helper does not own.
+6. Perform an XGo style pass. Replace redundant setup, error checks, package
+   qualifiers, and temporary collections with the simpler verified XGo/gsh
+   form from the style reference.
+7. Compile through LLAR's actual ixgo path, then run the target repository's
+   Formula validation for exact and representative versions, options, and
+   cache-hit tests required by the change.
+
+## Expression Order
+
+Choose the narrowest owner for each operation:
+
+- Use LLAR's CMake or Autotools helper for compile, archive, link, and
+  install. Those helpers run `cmake`/`configure`/`make` through LLAR's
+  execbroker so a later cross-compile toolchain and sysroot can be injected.
+- Use the inherited gsh surface for external commands, command environment,
+  captured output, and command status. Do not use gsh `cc`, `c++`, `ar`, or
+  `ld` from `onBuild` as a substitute for a helper.
+- Use XGo collection, string, lambda, property, command-call, and error-wrap
+  forms for Formula logic when the active ixgo accepts them.
+- Use Go standard-library packages through their XGo surface for structured
+  parsing, filesystem access, and data formats.
+
+Do not call `os/exec` from a Formula when gsh can run the command through
+LLAR's configured streams, working directory, and execution path.
 
 ## Hard Rules
 
-- Keep `versions.json.path`, Formula `id`, dependency module ids, and source tag
-  spelling consistent.
-- Keep the filename stem before the first underscore a valid Go identifier
-  without another underscore. LLAR uses that stem to find the generated class.
-- Put imports and helper declarations before the first top-level Formula call.
-- Declare direct dependencies only. Do not copy dependency names or versions
-  from another package.
-- Prefer source-synchronized `onRequire` over hardcoded dependency versions.
-  Do not add a new Formula merely because an upstream dependency version
-  changed when the existing Formula can read that change from the requested
-  tag.
-- Keep `versions.json` fallback dependencies conservative: choose versions
-  verified to work throughout the Formula's served range, not automatically
-  the newest available versions. The current loader indexes fallbacks by exact
-  requested source version, so record the fallback under every exact version
-  that may need it.
-- Use `onBuild ctx => { ... }` and `onTest ctx => { ... }`.
-- Use `target.require` for propagated environment requirements and
-  `target.options` for package-owned choices. Keep options independent.
-- Use `filter` only to reject a selection proved unsupported by the selected
-  source revision.
-- Treat `defaults` as option defaults, not as a list of legal values.
-- Call current CMake and Autotools `configure`, `build`, and `install` methods
-  directly. They return no value and panic on failure.
-- Check or error-wrap every required gsh command. A direct command or `exec`
-  call records failure in `lastErr`; an unchecked non-zero status does not fail
-  the hook.
-- Use `ctx.Errs.add(err)` only with a non-nil error and only when independent
-  failures should be accumulated. Use `!` or `panic err` for fail-fast
-  operations.
-- Make `onTest` independent of the `onBuild` scratch tree because `onBuild` is
-  skipped on cache hits.
-- Derive metadata from installed headers, libraries, tools, or package metadata.
-  Do not guess linker flags or blindly concatenate every dependency result.
-- Add `_cmp.gox` only when actual tag ordering cannot use the default GNU
-  comparison.
-- Do not add compatibility flags, fallbacks, generators, optional features, or
-  defensive branches unless the selected source proves they are required.
-
-Do not use legacy or generated surfaces in Formula source:
-
-- `onBuild (ctx, proj, out)` or `onTest (ctx, proj, out)`;
-- `BuildResult.AddErr`, `TestResult`, or a separate hook result parameter;
-- `ctx.currentMatrix()` or a top-level `matrix` declaration;
-- assignments such as `err := c.configure()` for current CMake or Autotools;
-- generated `XGot_`, `Gopt_`, `Gops_`, `Gopx_`, `Gopo_`, `__0`, or `__1`
-  names.
+- Preserve source tag spelling and keep module ids consistent across the
+  directory, metadata, Formula, and dependencies.
+- Declare only direct dependencies proved by the selected upstream source and
+  configuration.
+- Keep imports, types, fields, and classfile methods before the first top-level
+  executable Formula statement.
+- In llarhub, start the Formula filename stem with a lowercase ASCII letter,
+  for example `picobench_llar.gox`. Do not capitalize it from a repository or
+  type name even when LLAR accepts that spelling.
+- Use only callback signatures and APIs found in the resolved LLAR revision.
+- Never call generated `XGot_`, `Gopt_`, `Gops_`, `Gopx_`, `Gopo_`, or numbered
+  overload names from Formula source.
+- Fail every required command or required error-returning operation. Branch on
+  an error only when its distinct outcomes have verified meaning.
+- Put `!` on a required error-returning outer call, including a gsh command
+  inside `capout`. Keep parentheses when the result is consumed. Do not add `!`
+  to a void helper that fails internally, or use `lastErr!` when direct `!` has
+  the required semantics; read `lastErr` only for verified control flow.
+- Use unqualified XGo format builtins such as `fprintf!`, `fprintln!`,
+  `sprintf`, and `errorf`; do not import or prefix `fmt` only to call their Go
+  equivalents.
+  Prefer `${expr}` only when the expression has a verified XGo string
+  conversion. Use a format builtin for bool, `[]byte`, formatting directives,
+  or any value the active ixgo cannot interpolate.
+- Keep commands inside Formula lifecycle hooks; top-level Formula statements
+  register configuration and callbacks.
+- Derive metadata from the installed consumer interface and verify it with a
+  real consumer.
+- For C/C++ library metadata exposed through pkg-config, install a verified,
+  relocatable `.pc` file and set metadata from the complete pkg-config
+  cflags-and-libs lookup. Do not substitute a handwritten `-I`, `-L`, or `-l`
+  fragment, or a libs-only query, for the complete result.
+- Keep consumer tests independent of the build scratch tree so they can run on
+  a cache hit.
+- In `onBuild`, compile and install C/C++ packages only through the LLAR
+  CMake or Autotools helper. Do not call `cc`, `c++`, `gcc`, `clang`, `ar`,
+  `ld`, or equivalent compilers and archivers from `onBuild`. Naked compiler
+  invocations skip execbroker and block later LLAR cross-compile injection.
+- Match the helper to upstream: CMake when the selected revision has
+  `CMakeLists.txt`; Autotools when it has `configure` and/or a Makefile. Do
+  not invent a `CMakeLists.txt` or a replacement Makefile. Drive the
+  existing Makefile with `a.build` and `a.install`, passing make variables
+  such as `CFLAGS=` and explicit targets when the default target is tests.
+  Skip `a.configure` when there is no configure script. If the Makefile has
+  no `install` target, still compile through `a.build`, then copy the files
+  make produced into the output directory.
+- `onTest` may compile the consumer with `cc!` or `c++!` against installed
+  pkg-config flags. That is the only Formula hook where a naked compiler is
+  allowed.
+- Do not add compatibility paths, fallback behavior, flags, generators,
+  options, abstractions, or helpers without evidence that the current Formula
+  needs them.
+- Do not extract a helper merely to enable `?`, `!`, a comprehension, or
+  command-call syntax. Keep one-off control flow local.
+- Add a comparator only after checking every upstream version LLAR may select.
+  Every tag must belong to the comparator's accepted domain and the comparator
+  must order the complete set correctly; checking only Formula thresholds or a
+  few sample versions is insufficient.
 
 ## Validation
 
-From a Formula-store root, validate a local module with its exact source tag:
+Discover the supported command line from the LLAR revision or the Formula
+store workflow before running it. Validate through that exact LLAR build, not a
+different globally installed binary.
 
-```sh
-llar test -v ./owner/repo@exact-source-tag
-```
+At minimum, prove:
 
-With any explicit matrix flag, supply every required environment dimension:
+- Formula parsing and selection for every changed threshold;
+- the lowest compatible `fromVer` and rejection or incompatibility immediately
+  below it;
+- comparator validity and ordering across the complete upstream version set
+  when a comparator exists;
+- dependency discovery and fallback behavior for representative exact tags;
+- default and every retained output-changing matrix selection;
+- required command failure propagation;
+- installed headers, libraries, tools, or package metadata, including the
+  installed `.pc` file and complete pkg-config lookup result when applicable;
+- consumer behavior after a fresh build and, when supported, a cache hit.
 
-```sh
-llar test -v ./owner/repo@exact-source-tag \
-  --os "$(go env GOOS)" --arch "$(go env GOARCH)" \
-  --option feature=value
-```
-
-Repeat the command for representative versions across the affected Formula
-range. Confirm Formula selection, source-synchronized direct dependencies,
-fallback behavior, installed files, consumer metadata, defaults, supported
-options, `filter` rejection, command failure propagation, and cache-hit
-`onTest` behavior. Do not accept parsing or build success alone as proof that
-the installed package is usable.
+Do not accept successful parsing or compilation as proof that the installed
+package is usable.
