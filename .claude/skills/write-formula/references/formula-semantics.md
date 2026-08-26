@@ -65,7 +65,7 @@ rules. Treat static dependency entries as verified conservative data, not as a
 place to copy the newest known dependency versions. Never add fallback data for
 a failure mode that has not been shown to occur.
 
-## Matrix And Options
+## Matrix, Target, And Options
 
 Expose a dimension only when it changes dependencies, commands, installed
 output, metadata, tests, or supported platforms.
@@ -79,6 +79,30 @@ output, metadata, tests, or supported platforms.
 
 Keep options independent. Combine values that represent one indivisible choice
 instead of creating invalid cartesian combinations.
+
+Read the selected target from Formula `target`, not from the host process:
+
+- `target.require["os"]` and `target.require["arch"]` are the selected
+  platform. Use the selected value, typically `target.require["os"][0]`, or a
+  membership test such as `slices.contains(target.require["os"], "linux")`.
+- Do not import `"runtime"` or use `runtime.GOOS` / `runtime.GOARCH`. Those
+  report the interpreter host, which is wrong under cross-compile and when
+  CI injects `--os` / `--arch`.
+- Do not write `osName := runtime.GOOS` and then overwrite it from
+  `target.require["os"]`. Do not fall back to the host when require is
+  empty; missing require is a matrix contract failure.
+- `target.options["name"]` is the selected option values. Read the active
+  choice as `target.options["name"][0]`. Do not treat
+  `slices.contains(target.options["name"], "ON")` as the selected value when
+  the slice can hold both a default and an override.
+- When the resolved LLAR revision exposes `target.version`, it is the original
+  version or ref selected for this build. Use it when the Formula must name
+  that tag: a `.pc` `Version` field, a version-specific source path, or a
+  dependency that tracks the same tag. It is not `fromVer`; `fromVer` is the
+  Formula range floor.
+
+`filter` may inspect `target.require`, `target.options`, and `target.version`
+to reject unsupported selections.
 
 ## Build And Install
 

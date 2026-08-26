@@ -200,6 +200,11 @@ registered helpers; ordinary packages such as `os`, `strings`, `slices`, and
 `encoding/json` still require an import. Resolve this list against the active
 LLAR revision instead of assuming a helper is globally available.
 
+Do not import `"runtime"` to read `GOOS` or `GOARCH` from a Formula. Those
+are host-process values. Use `target.require["os"]` and `target.require["arch"]`.
+When the resolved LLAR revision exposes `target.version`, that is the selected
+version or ref for this build.
+
 Use lowercase XGo aliases and auto-properties only for verified exported Go
 functions and zero-argument getters, such as `filepath.join`, `ctx.outputDir`,
 and `entry.isDir`. Keep parentheses for nested calls and calls whose result is
