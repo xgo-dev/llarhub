@@ -1,0 +1,97 @@
+import "os"
+import "path/filepath"
+import "slices"
+
+id "coin-or/qpOASES"
+
+fromVer "releases/3.1.1"
+
+// qpOASES exposes a single, package-owned build choice worth translating:
+// the Conan recipe's `fPIC` option (default True, dropped on Windows).
+// It maps to CMAKE_POSITION_INDEPENDENT_CODE for the static library.
+defaults {
+	"fPIC": "ON",
+}
+
+// Conan accepts only boolean fPIC values and removes the option on Windows.
+filter => {
+	for value in target.options["fPIC"] {
+		if value != "ON" && value != "OFF" {
+			return false
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	// Upstream declares cmake_minimum_required(VERSION 2.6); modern CMake
+	// refuses that compatibility floor without an explicit policy version.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+
+	// Match the Conan recipe: build only the library, not the examples.
+	c.defineBool "QPOASES_BUILD_EXAMPLES", false
+
+	// Conan removes fPIC on Windows; CMake ignores it there as well.
+	if !slices.contains(target.require["os"], "windows") {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", slices.contains(target.options["fPIC"], "ON")
+	}
+
+	c.configure
+	c.build
+	c.install
+
+	// No upstream pkg-config file exists; publish the verified consumer flags.
+	includeDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
+	ctx.setMetadata "-I${includeDir} -L${libDir} -lqpOASES"
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+
+	// Consumer check derived from the Conan test_package: include the public
+	// header and construct/solve a QProblem against the installed library.
+	// Built in an independent tree so onTest also passes on a cache hit,
+	// where onBuild (and its _build dir) never ran.
+	testDir := filepath.join(ctx.SourceDir, "_qpoases_test")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := `#include <qpOASES.hpp>
+
+int main()
+{
+	USING_NAMESPACE_QPOASES
+
+	// 2 variables, 1 constraint (mirrors the Conan test_package problem).
+	real_t H[2*2] = { 1.0, 0.0, 0.0, 0.5 };
+	real_t A[1*2] = { 1.0, 1.0 };
+	real_t g[2]   = { 1.5, 1.0 };
+	real_t lb[2]  = { 0.5, -2.0 };
+	real_t ub[2]  = { 5.0, 2.0 };
+	real_t lbA[1] = { -1.0 };
+	real_t ubA[1] = { 2.0 };
+
+	QProblem example( 2, 1 );
+
+	Options options;
+	example.setOptions( options );
+
+	int nWSR = 10;
+	returnValue rv = example.init( H, g, A, lb, ub, lbA, ubA, nWSR );
+
+	return ( rv == SUCCESSFUL_RETURN ) ? 0 : 1;
+}
+`
+	consumerPath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumerPath, []byte(consumer), 0o644)!
+
+	includeDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-I${includeDir}", consumerPath, "-L${libDir}", "-lqpOASES", "-o", binary
+	exec! binary
+}
