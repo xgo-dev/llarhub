@@ -1,0 +1,17 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+
+node_modules
+dist
+*.local
+.playwright-cli
+output/playwright
+output/imagegen
+
+# Editor files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store

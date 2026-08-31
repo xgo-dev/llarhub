@@ -1,0 +1,48 @@
+import { Link } from '@heroui/react'
+
+export default function HomeFooter() {
+  return (
+    <footer className="home-footer" id="docs">
+      <div className="home-footer__inner">
+        <div className="home-footer__brand">
+          <div className="home-footer__lockup" aria-label="XGO LLARHub">
+            <svg aria-hidden="true" className="home-footer__xgo-logo" fill="none" viewBox="0 0 64 32" xmlns="http://www.w3.org/2000/svg">
+              <path d="M24 8L10.72 24H5.78L12.46 16L6 8H10.89L14.89 13L19.02 8H24ZM15.66 19.92L19 24H23.88L18.18 16.93L15.66 19.92Z" fill="currentColor" />
+              <path clipRule="evenodd" d="M40 8V11.8H29C27.69 11.8 25.8 13.19 25.8 16C25.8 18.81 27.69 20.2 29 20.2H35V24H29C25.13 24 22 20.42 22 16C22 11.58 25.13 8 29 8H40ZM37 14H30V17.8H36.2V24H40V17C39.9822 16.2099 39.6604 15.4572 39.1016 14.8984C38.5428 14.3396 37.7901 14.0178 37 14Z" fill="currentColor" fillRule="evenodd" />
+              <path d="M51.81 10H46.81C45.1153 10.2043 43.5589 11.0366 42.448 12.3326C41.3372 13.6286 40.7527 15.294 40.81 17C40.7527 18.706 41.3372 20.3714 42.448 21.6674C43.5589 22.9634 45.1153 23.7957 46.81 24H51.81C53.5056 23.7979 55.0634 22.9662 56.1747 21.6697C57.286 20.3732 57.8696 18.7066 57.81 17C57.872 15.2929 57.2891 13.6249 56.1774 12.3279C55.0657 11.0309 53.5065 10.1998 51.81 10ZM51.81 20.11H46.81C46.1532 19.9092 45.583 19.4933 45.1912 18.9292C44.7994 18.3651 44.6088 17.6856 44.65 17C44.6066 16.3076 44.7983 15.6208 45.1939 15.0509C45.5896 14.481 46.1661 14.0614 46.83 13.86H51.83C52.4921 14.0632 53.0663 14.4836 53.46 15.0533C53.8537 15.6231 54.044 16.3089 54 17C54.0376 17.6891 53.842 18.3708 53.4447 18.935C53.0473 19.4993 52.4715 19.9132 51.81 20.11Z" fill="currentColor" />
+            </svg>
+            <span className="home-footer__slash" aria-hidden="true">/</span>
+            <span className="home-footer__wordmark">LLARHub</span>
+          </div>
+          <p className="home-footer__description">
+            A GitHub-native catalog for discovering C and C++ libraries and LLAR prebuilt packages.
+          </p>
+        </div>
+
+        <nav className="home-footer__navigation" aria-label="Footer navigation">
+          <div>
+            <h2 className="home-footer__heading">Product</h2>
+            <ul className="home-footer__links">
+              <li><Link className="home-footer__link" href="/#explore">Explore</Link></li>
+              <li><Link className="home-footer__link" href="/#packages">Packages</Link></li>
+              <li><Link className="home-footer__link" href="/#docs">Documentation</Link></li>
+            </ul>
+          </div>
+          <div>
+            <h2 className="home-footer__heading">Community</h2>
+            <ul className="home-footer__links">
+              <li><Link className="home-footer__link" href="https://github.com/xgo-dev/llarhub" rel="noreferrer" target="_blank">GitHub</Link></li>
+              <li><Link className="home-footer__link" href="https://github.com/xgo-dev" rel="noreferrer" target="_blank">XGO organization</Link></li>
+              <li><Link className="home-footer__link" href="https://github.com/xgo-dev/llarhub/issues" rel="noreferrer" target="_blank">Issues</Link></li>
+            </ul>
+          </div>
+        </nav>
+      </div>
+
+      <div className="home-footer__bottom">
+        <span>© 2026 XGO. LLARHub is built for the C/C++ ecosystem.</span>
+        <span className="home-footer__status"><span aria-hidden="true" />Open source on GitHub</span>
+      </div>
+    </footer>
+  )
+}
