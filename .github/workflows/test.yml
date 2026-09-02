@@ -16,7 +16,7 @@ concurrency:
 jobs:
   changes:
     name: Find changed modules
-    runs-on: ubuntu-latest
+    runs-on: [qiniu, ubuntu-24.04]
     outputs:
       modules: ${{ steps.modules.outputs.modules }}
       has_modules: ${{ steps.modules.outputs.has_modules }}
@@ -26,6 +26,13 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Configure Qiniu Go environment
+        shell: bash
+        run: |
+          echo "GOPATH=${GITHUB_WORKSPACE}/.cache/go" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=${GITHUB_WORKSPACE}/.cache/go/pkg/mod" >> "$GITHUB_ENV"
+          echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -97,7 +104,7 @@ jobs:
         run: |
           echo "GOPATH=${GITHUB_WORKSPACE}/.cache/go" >> "$GITHUB_ENV"
           echo "GOMODCACHE=${GITHUB_WORKSPACE}/.cache/go/pkg/mod" >> "$GITHUB_ENV"
-          echo "GOCACHE=/tmp/go-build-cache" >> "$GITHUB_ENV"
+          echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
 
       - name: Set up Go
         uses: actions/setup-go@v7
