@@ -31,6 +31,7 @@ jobs:
         shell: bash
         run: |
           echo "GOPATH=${GITHUB_WORKSPACE}/.cache/go" >> "$GITHUB_ENV"
+          echo "GOBIN=${GITHUB_WORKSPACE}/.cache/go/bin" >> "$GITHUB_ENV"
           echo "GOMODCACHE=${GITHUB_WORKSPACE}/.cache/go/pkg/mod" >> "$GITHUB_ENV"
           echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
 
@@ -103,6 +104,7 @@ jobs:
         shell: bash
         run: |
           echo "GOPATH=${GITHUB_WORKSPACE}/.cache/go" >> "$GITHUB_ENV"
+          echo "GOBIN=${GITHUB_WORKSPACE}/.cache/go/bin" >> "$GITHUB_ENV"
           echo "GOMODCACHE=${GITHUB_WORKSPACE}/.cache/go/pkg/mod" >> "$GITHUB_ENV"
           echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
 
