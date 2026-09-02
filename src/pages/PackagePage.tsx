@@ -283,8 +283,8 @@ export default function PackagePage() {
 
         <div className="relative mx-auto w-full max-w-[1340px] px-6 2xl:px-0">
           <Breadcrumbs className="text-sm text-[#6b7da2]">
-            <Breadcrumbs.Item href="/#packages">Packages</Breadcrumbs.Item>
-            <Breadcrumbs.Item href="/packages/google">google</Breadcrumbs.Item>
+            <Breadcrumbs.Item href={`${import.meta.env.BASE_URL}#packages`}>Packages</Breadcrumbs.Item>
+            <Breadcrumbs.Item href={`${import.meta.env.BASE_URL}packages/google`}>google</Breadcrumbs.Item>
             <Breadcrumbs.Item>highway</Breadcrumbs.Item>
           </Breadcrumbs>
 

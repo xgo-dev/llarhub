@@ -92,7 +92,7 @@ export default function OwnerPackagesPage() {
       <section className="border-b border-[#e2e8f3] bg-[#f7f9ff] pt-[108px]">
         <div className="mx-auto w-full max-w-[1340px] px-6 pb-10 2xl:px-0">
           <Breadcrumbs className="text-sm text-[#6b7da2]">
-            <Breadcrumbs.Item href="/packages">Packages</Breadcrumbs.Item>
+            <Breadcrumbs.Item href={`${import.meta.env.BASE_URL}packages`}>Packages</Breadcrumbs.Item>
             {ownerFilter ? <Breadcrumbs.Item>{ownerFilter}</Breadcrumbs.Item> : null}
           </Breadcrumbs>
 

@@ -7,11 +7,10 @@ import './index.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
       <MotionConfig reducedMotion="user">
         <App />
       </MotionConfig>
     </BrowserRouter>
   </StrictMode>,
 )
-

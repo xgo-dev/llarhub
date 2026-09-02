@@ -41,7 +41,7 @@ export default function HomeNavbar() {
       }}
     >
       <header className="home-nav-surface home-navigation">
-        <Link className="home-nav-brand" href="/">
+        <Link className="home-nav-brand" href={import.meta.env.BASE_URL}>
           <svg aria-hidden="true" className="home-nav-xgo-logo" fill="none" viewBox="0 0 64 32" xmlns="http://www.w3.org/2000/svg">
             <path d="M24 8L10.72 24H5.78L12.46 16L6 8H10.89L14.89 13L19.02 8H24ZM15.66 19.92L19 24H23.88L18.18 16.93L15.66 19.92Z" fill="currentColor" />
             <path clipRule="evenodd" d="M40 8V11.8H29C27.69 11.8 25.8 13.19 25.8 16C25.8 18.81 27.69 20.2 29 20.2H35V24H29C25.13 24 22 20.42 22 16C22 11.58 25.13 8 29 8H40ZM37 14H30V17.8H36.2V24H40V17C39.9822 16.2099 39.6604 15.4572 39.1016 14.8984C38.5428 14.3396 37.7901 14.0178 37 14Z" fill="currentColor" fillRule="evenodd" />
@@ -52,9 +52,9 @@ export default function HomeNavbar() {
         </Link>
 
         <ul className="home-nav-links">
-          <li><Link aria-current={packagesActive ? undefined : 'page'} className={`home-nav-link${packagesActive ? '' : ' home-nav-link--active'}`} href="/#explore">Explore</Link></li>
-          <li><Link aria-current={packagesActive ? 'page' : undefined} className={`home-nav-link${packagesActive ? ' home-nav-link--active' : ''}`} href="/#packages">Packages</Link></li>
-          <li><Link className="home-nav-link" href="/#docs">Docs</Link></li>
+          <li><Link aria-current={packagesActive ? undefined : 'page'} className={`home-nav-link${packagesActive ? '' : ' home-nav-link--active'}`} href={`${import.meta.env.BASE_URL}#explore`}>Explore</Link></li>
+          <li><Link aria-current={packagesActive ? 'page' : undefined} className={`home-nav-link${packagesActive ? ' home-nav-link--active' : ''}`} href={`${import.meta.env.BASE_URL}#packages`}>Packages</Link></li>
+          <li><Link className="home-nav-link" href={`${import.meta.env.BASE_URL}#docs`}>Docs</Link></li>
         </ul>
 
         <div className="home-nav-actions">
@@ -93,9 +93,9 @@ export default function HomeNavbar() {
             transition={{ duration: reduceMotion ? 0 : 0.18, ease: 'easeOut' }}
           >
             <ul className="home-nav-mobile-list">
-              <li><Link aria-current={packagesActive ? undefined : 'page'} className={`home-nav-mobile-link${packagesActive ? '' : ' home-nav-mobile-link--active'}`} href="/#explore" onPress={() => setMenuOpen(false)}>Explore</Link></li>
-              <li><Link aria-current={packagesActive ? 'page' : undefined} className={`home-nav-mobile-link${packagesActive ? ' home-nav-mobile-link--active' : ''}`} href="/#packages" onPress={() => setMenuOpen(false)}>Packages</Link></li>
-              <li><Link className="home-nav-mobile-link" href="/#docs" onPress={() => setMenuOpen(false)}>Docs</Link></li>
+              <li><Link aria-current={packagesActive ? undefined : 'page'} className={`home-nav-mobile-link${packagesActive ? '' : ' home-nav-mobile-link--active'}`} href={`${import.meta.env.BASE_URL}#explore`} onPress={() => setMenuOpen(false)}>Explore</Link></li>
+              <li><Link aria-current={packagesActive ? 'page' : undefined} className={`home-nav-mobile-link${packagesActive ? ' home-nav-mobile-link--active' : ''}`} href={`${import.meta.env.BASE_URL}#packages`} onPress={() => setMenuOpen(false)}>Packages</Link></li>
+              <li><Link className="home-nav-mobile-link" href={`${import.meta.env.BASE_URL}#docs`} onPress={() => setMenuOpen(false)}>Docs</Link></li>
             </ul>
           </motion.div>
         )}

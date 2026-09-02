@@ -23,9 +23,9 @@ export default function HomeFooter() {
           <div>
             <h2 className="home-footer__heading">Product</h2>
             <ul className="home-footer__links">
-              <li><Link className="home-footer__link" href="/#explore">Explore</Link></li>
-              <li><Link className="home-footer__link" href="/#packages">Packages</Link></li>
-              <li><Link className="home-footer__link" href="/#docs">Documentation</Link></li>
+              <li><Link className="home-footer__link" href={`${import.meta.env.BASE_URL}#explore`}>Explore</Link></li>
+              <li><Link className="home-footer__link" href={`${import.meta.env.BASE_URL}#packages`}>Packages</Link></li>
+              <li><Link className="home-footer__link" href={`${import.meta.env.BASE_URL}#docs`}>Documentation</Link></li>
             </ul>
           </div>
           <div>
