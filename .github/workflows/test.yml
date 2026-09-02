@@ -63,7 +63,8 @@ jobs:
           - darwin-arm64
         include:
           - platform: linux-amd64
-            runner: ubuntu-24.04
+            runner: [qiniu, ubuntu-24.04]
+            qiniu: true
             goos: linux
             goarch: amd64
           - platform: linux-arm64
@@ -89,6 +90,14 @@ jobs:
           repository: goplus/llar
           ref: main
           path: .llar-source
+
+      - name: Configure Qiniu Go environment
+        if: matrix.qiniu
+        shell: bash
+        run: |
+          echo "GOPATH=${GITHUB_WORKSPACE}/.cache/go" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=${GITHUB_WORKSPACE}/.cache/go/pkg/mod" >> "$GITHUB_ENV"
+          echo "GOCACHE=/tmp/go-build-cache" >> "$GITHUB_ENV"
 
       - name: Set up Go
         uses: actions/setup-go@v7
