@@ -1,0 +1,112 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <farmhash.h>
+
+#include <iostream>
+#include <string>
+
+int main() {
+    std::string aString = "Conan";
+    uint32_t hashResult;
+
+    hashResult = util::Hash32(aString);
+
+    std::cout << "Input string: " << aString << std::endl;
+    std::cout << "Generated hash: " << hashResult << std::endl;
+
+    return 0;
+}
+`
+
+id "google/farmhash"
+
+fromVer "0d859a811870d10f53a594927d0d0b97573ad06d"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	// OFF lets CMake probe for __builtin_expect; ON always defines the
+	// public FARMHASH_NO_BUILTIN_EXPECT consumer macro.
+	"no_builtin_expect": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "no_builtin_expect" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	cmakeLists := ctx.Proj.readFile("0d859a811870d10f53a594927d0d0b97573ad06d/CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	noBuiltinExpect := slices.contains(target.options["no_builtin_expect"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "FARMHASH_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "FARMHASH_NO_BUILTIN_EXPECT", noBuiltinExpect
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	pkgconfig.use installDir
+	metadata := pkgconfig.lookup("farmhash")!
+	ctx.setMetadata metadata
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+
+	pkgconfig.use installDir
+	flags := strings.fields(pkgconfig.lookup("farmhash")!)
+	args := []string{consumer, "-o", binary}
+	args = append(args, flags...)
+	exec "c++", args...
+	lastErr!
+
+	if slices.contains(target.options["shared"], "ON") {
+		libDir := filepath.join(installDir, "lib")
+		ldPath := libDir
+		if current := os.getenv("LD_LIBRARY_PATH"); current != "" {
+			ldPath += ":" + current
+		}
+		dyldPath := libDir
+		if current := os.getenv("DYLD_LIBRARY_PATH"); current != "" {
+			dyldPath += ":" + current
+		}
+		exec! {"LD_LIBRARY_PATH": ldPath, "DYLD_LIBRARY_PATH": dyldPath}, binary
+		return
+	}
+	exec binary
+	lastErr!
+}
