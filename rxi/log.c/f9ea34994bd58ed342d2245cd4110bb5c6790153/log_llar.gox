@@ -1,0 +1,129 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+var cmakeLists = `cmake_minimum_required(VERSION 3.8)
+project(log.c LANGUAGES C)
+
+option(LOGC_USE_COLOR "Use Color" ON)
+
+add_library(log.c $${LOGC_SRC_FOLDER}/src/log.c)
+set_target_properties(log.c PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+target_compile_features(log.c PRIVATE c_std_99)
+
+if(LOGC_USE_COLOR)
+    target_compile_definitions(log.c PRIVATE LOG_USE_COLOR)
+endif()
+
+include(GNUInstallDirs)
+install(FILES $${LOGC_SRC_FOLDER}/src/log.h DESTINATION $${CMAKE_INSTALL_INCLUDEDIR})
+install(
+    TARGETS log.c
+    LIBRARY DESTINATION $${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION $${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION $${CMAKE_INSTALL_BINDIR}
+)
+`
+
+const consumerSource = `#include <log.h>
+
+int main(void) {
+    log_trace("Hello %s", "world");
+    log_trace(log_level_string(0));
+    return 0;
+}
+`
+
+id "rxi/log.c"
+
+fromVer "f9ea34994bd58ed342d2245cd4110bb5c6790153"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"color": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "color" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	cmakeDir := filepath.join(ctx.SourceDir, "_llar_cmake")
+	os.mkdirAll(cmakeDir, 0o755)!
+	os.writeFile(filepath.join(cmakeDir, "CMakeLists.txt"), []byte(cmakeLists), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	color := slices.contains(target.options["color"], "ON")
+
+	c := cmake.new(cmakeDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "LOGC_SRC_FOLDER", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "LOGC_USE_COLOR", color
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pkgconfigDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: log.c
+Description: A simple logging library implemented in C99
+Version: f9ea34994bd58ed342d2245cd4110bb5c6790153
+Cflags: -I$${includedir}
+Libs: -L$${libdir} -llog.c
+`
+	os.writeFile(filepath.join(pkgconfigDir, "log.c.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("log.c")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	binary := filepath.join(testDir, "consumer")
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "log.c.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("log.c")!), 0o644)!
+	args := []string{
+		sourcePath,
+		"-o", binary,
+		"@" + flagsFile,
+	}
+	cc! args...
+
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
