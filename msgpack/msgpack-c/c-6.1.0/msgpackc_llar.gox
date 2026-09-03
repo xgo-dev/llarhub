@@ -1,0 +1,123 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <msgpack.h>
+
+int main(void) {
+    msgpack_sbuffer sbuf;
+    msgpack_sbuffer_init(&sbuf);
+
+    msgpack_packer pk;
+    msgpack_packer_init(&pk, &sbuf, msgpack_sbuffer_write);
+    if (msgpack_pack_array(&pk, 3) != 0) {
+        return 1;
+    }
+    if (msgpack_pack_int(&pk, 1) != 0) {
+        return 1;
+    }
+    if (msgpack_pack_int(&pk, 2) != 0) {
+        return 1;
+    }
+    if (msgpack_pack_int(&pk, 3) != 0) {
+        return 1;
+    }
+
+    msgpack_unpacked unpacked;
+    msgpack_unpacked_init(&unpacked);
+    size_t off = 0;
+    if (msgpack_unpack_next(&unpacked, sbuf.data, sbuf.size, &off) != MSGPACK_UNPACK_SUCCESS) {
+        return 1;
+    }
+    if (unpacked.data.type != MSGPACK_OBJECT_ARRAY || unpacked.data.via.array.size != 3) {
+        return 1;
+    }
+
+    msgpack_unpacked_destroy(&unpacked);
+    msgpack_sbuffer_destroy(&sbuf);
+    return 0;
+}
+`
+
+id "msgpack/msgpack-c"
+
+fromVer "c-6.1.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "MSGPACK_ENABLE_SHARED", shared
+	c.defineBool "MSGPACK_ENABLE_STATIC", !shared
+	c.defineBool "MSGPACK_BUILD_EXAMPLES", false
+	c.defineBool "MSGPACK_BUILD_TESTS", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE_1_0.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE_1_0.txt"))!, 0o644)!
+
+	// Upstream writes prefix from CMAKE_INSTALL_PREFIX. Keep its flags and
+	// publish relocatable pkg-config metadata under Conan's msgpack name.
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	pcPath := filepath.join(pcDir, "msgpack-c.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+	pc = strings.replace(pc, "exec_prefix="+installDir, "exec_prefix=$${prefix}", 1)
+	pc = strings.replace(pc, "libdir="+filepath.join(installDir, "lib"), "libdir=$${prefix}/lib", 1)
+	pc = strings.replace(pc, "includedir="+filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+	os.writeFile(filepath.join(pcDir, "msgpack.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("msgpack")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "msgpack.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("msgpack")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}

@@ -1,0 +1,17 @@
+import "strings"
+
+// The repository publishes both C tags (`c-X.Y.Z`) and C++ tags (`cpp-*`),
+// plus a few unprefixed historical tags. GNU version comparison ranks
+// letters above digits, so `cpp-*` would outrank `c-*`. Keep every visible
+// tag in the comparator domain, but order C releases by the numeric part
+// after `c-` and map everything else below that line.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "c-") {
+		return "v" + strings.trimPrefix(version, "c-")
+	}
+	return "v0.0.0-" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
