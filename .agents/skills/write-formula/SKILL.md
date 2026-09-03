@@ -10,6 +10,8 @@ the gsh execution surface. Write idiomatic XGo/gsh source, not Go code with a
 `.gox` suffix. Use the simplest verified XGo/gsh form that preserves the
 required semantics.
 
+Work efficiently: satisfy every required investigation and validation outcome, but keep the time and context spent on each library bounded, reuse verified evidence, and autonomously choose the shortest reliable path.
+
 ## Establish The Contract
 
 Before interpreting or editing a Formula:
