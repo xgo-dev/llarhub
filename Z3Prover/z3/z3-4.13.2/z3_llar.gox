@@ -1,0 +1,75 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+id "Z3Prover/z3"
+
+fromVer "z3-4.13.2"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+	c.defineBool "Z3_USE_LIB_GMP", false
+	c.defineBool "Z3_SINGLE_THREADED", false
+	c.defineBool "Z3_BUILD_LIBZ3_SHARED", false
+	c.defineBool "Z3_INCLUDE_GIT_HASH", false
+	c.defineBool "Z3_INCLUDE_GIT_DESCRIBE", false
+	c.defineBool "Z3_ENABLE_EXAMPLE_TARGETS", false
+	c.defineBool "Z3_BUILD_DOCUMENTATION", false
+	c.configure
+	c.build "--parallel", "4"
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!, 0o644)!
+
+	// Upstream writes the install prefix into z3.pc and omits private static
+	// dependencies. Make the installed consumer interface relocatable and complete.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "z3.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = pc.replace("prefix="+installDir, `prefix=$${pcfiledir}/../..`, 1)
+	pc = pc.replace("exec_prefix="+installDir, `exec_prefix=$${prefix}`, 1)
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		lines := pc.split("\n")
+		for i, line in lines {
+			if line.hasPrefix("Libs:") {
+				if !line.contains(" -lpthread") {
+					line += " -lpthread"
+				}
+				if !line.contains(" -lm") {
+					line += " -lm"
+				}
+				lines[i] = line
+			}
+		}
+		pc = lines.join("\n")
+	}
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("z3")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, ctx.Proj.readFile("z3-4.13.2/consumer.cpp")!, 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "z3.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("z3")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}

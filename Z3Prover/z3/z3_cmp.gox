@@ -1,0 +1,23 @@
+func releaseVersion(version string) (string, bool) {
+	if version.hasPrefix("z3-") {
+		version = "v" + version.trimPrefix("z3-")
+	} else if version.hasPrefix("Z3-") {
+		version = "v" + version.trimPrefix("Z3-")
+	}
+	return version, semver.isValid(version)
+}
+
+compareVer (a, b) => {
+	aVersion, aRelease := releaseVersion(a.Version)
+	bVersion, bRelease := releaseVersion(b.Version)
+	if aRelease && bRelease {
+		return semver.compare(aVersion, bVersion)
+	}
+	if aRelease {
+		return 1
+	}
+	if bRelease {
+		return -1
+	}
+	return gnu.compare(a.Version, b.Version)
+}
