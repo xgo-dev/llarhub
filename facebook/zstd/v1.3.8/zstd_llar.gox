@@ -1,0 +1,77 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+id "facebook/zstd"
+
+fromVer "v1.3.8"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(filepath.join(ctx.SourceDir, "build", "cmake"), filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	// zstd before 1.5.6 declares compatibility with old CMake versions, which
+	// CMake 4 no longer accepts unless the project has an explicit policy floor.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "ZSTD_BUILD_PROGRAMS", false
+	c.defineBool "ZSTD_BUILD_TESTS", false
+	c.defineBool "ZSTD_BUILD_STATIC", true
+	c.defineBool "ZSTD_BUILD_SHARED", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	// Upstream embeds CMAKE_INSTALL_PREFIX and keeps thread linkage private.
+	// Publish a relocatable interface complete for this static-only package.
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "libzstd.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = pc.replace("prefix="+installDir, `prefix=$${pcfiledir}/../..`, 1)
+	pc = pc.replace("libdir="+filepath.join(installDir, "lib"), `libdir=$${prefix}/lib`, 1)
+	pc = pc.replace("includedir="+filepath.join(installDir, "include"), `includedir=$${prefix}/include`, 1)
+
+	lines := pc.split("\n")
+	privateLibs := ""
+	for line in lines {
+		if line.hasPrefix("Libs.private:") {
+			privateLibs = line.trimPrefix("Libs.private:").trimSpace()
+		}
+	}
+	if target.require["os"][0] == "linux" && privateLibs == "" {
+		privateLibs = "-lpthread"
+	}
+	if privateLibs != "" {
+		for i, line in lines {
+			if line.hasPrefix("Libs:") && !line.contains(privateLibs) {
+				lines[i] = line + " " + privateLibs
+			}
+		}
+	}
+	os.writeFile(pcPath, []byte(lines.join("\n")), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libzstd")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, ctx.Proj.readFile("v1.3.8/consumer.c")!, 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libzstd.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libzstd")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
