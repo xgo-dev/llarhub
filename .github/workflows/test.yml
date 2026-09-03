@@ -108,11 +108,15 @@ jobs:
           echo "GOMODCACHE=${RUNNER_TEMP}/go/pkg/mod" >> "$GITHUB_ENV"
           echo "GOCACHE=${RUNNER_TEMP}/go-build-cache" >> "$GITHUB_ENV"
 
-      - name: Install Qiniu build dependencies
-        if: matrix.qiniu
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake
+          sudo apt-get install -y autoconf automake build-essential cmake gperf groff patch
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: brew install autoconf automake gperf groff
 
       - name: Set up Go
         uses: actions/setup-go@v7
