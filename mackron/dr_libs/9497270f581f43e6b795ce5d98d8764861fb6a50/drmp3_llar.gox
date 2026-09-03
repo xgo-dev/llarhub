@@ -1,0 +1,135 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <stdio.h>
+#include "dr_mp3.h"
+
+int main(void) {
+    const char *version = drmp3_version_string();
+    puts(version);
+    return version == NULL;
+}
+`
+
+id "mackron/dr_libs"
+
+// The Conan recipe serves 0.6.32, 0.6.34, and 0.6.38 from one build recipe.
+// Their exported CMake contract and installed dr_mp3.h interface are the same.
+fromVer "9497270f581f43e6b795ce5d98d8764861fb6a50"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"no_simd": "OFF",
+	"no_stdio": "OFF",
+}
+
+filter => {
+	for name in []string{"shared", "fPIC", "no_simd", "no_stdio"} {
+		for value in target.options[name] {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	// CCI exports these two files because dr_libs is a single-header library.
+	cmakeLists := ctx.Proj.readFile("9497270f581f43e6b795ce5d98d8764861fb6a50/CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+	implementation := ctx.Proj.readFile("9497270f581f43e6b795ce5d98d8764861fb6a50/dr_mp3.c")!
+	os.writeFile(filepath.join(ctx.SourceDir, "dr_mp3.c"), implementation, 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	noSimd := slices.contains(target.options["no_simd"], "ON")
+	noStdio := slices.contains(target.options["no_stdio"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "DRMP3_SRC_DIR", ctx.SourceDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "NO_SIMD", noSimd
+	c.defineBool "NO_STDIO", noStdio
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	license := os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), license, 0o644)!
+
+	// Keep the package metadata relocatable and synchronized with every
+	// output-changing option exposed by the Conan recipe.
+	header := string(os.readFile(filepath.join(ctx.SourceDir, "dr_mp3.h"))!)
+	versionParts := map[string]string{}
+	for line in strings.split(header, "\n") {
+		fields := strings.fields(line)
+		if fields.len == 3 && fields[0] == "#define" {
+			versionParts[fields[1]] = fields[2]
+		}
+	}
+	version := strings.join([]string{
+		versionParts["DRMP3_VERSION_MAJOR"],
+		versionParts["DRMP3_VERSION_MINOR"],
+		versionParts["DRMP3_VERSION_REVISION"],
+	}, ".")
+
+	cflags := "-I$${includedir}"
+	if shared {
+		cflags += " -DDRMP3_DLL"
+	}
+	if noSimd {
+		cflags += " -DDR_MP3_NO_SIMD"
+	}
+	if noStdio {
+		cflags += " -DDR_MP3_NO_STDIO"
+	}
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: drmp3
+Description: MP3 audio decoder
+Version: ` + version + `
+Libs: -L$${libdir} -ldr_mp3
+Cflags: ` + cflags + `
+`
+	os.writeFile(filepath.join(pcDir, "drmp3.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("drmp3")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("drmp3")!
+	flagsFile := filepath.join(testDir, "drmp3.flags")
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c99", "@"+flagsFile, consumer, "-o", binary
+
+	os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	exec! binary
+}

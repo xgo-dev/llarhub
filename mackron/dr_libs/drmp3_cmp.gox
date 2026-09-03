@@ -1,0 +1,32 @@
+import "strings"
+
+// dr_libs publishes flac-, mp3-, and wav-prefixed tags in one repository.
+// Conan also selects three untagged dr_mp3 release commits. The default GNU
+// comparator orders those commit hashes by spelling, not by their release
+// versions (for example, 0.6.38's 01d23... sorts before 0.6.32's 949727...).
+// Map every visible tag and Conan ref into a distinct semver namespace so the
+// mp3 release line is ordered chronologically and remains the latest line.
+func normalize(version string) string {
+	switch version {
+	case "9497270f581f43e6b795ce5d98d8764861fb6a50":
+		return "v3.6.32"
+	case "dd762b861ecadf5ddd5fb03e9ca1db6707b54fbb":
+		return "v3.6.34"
+	case "01d23df76776faccee3bc456f685900dcc273b4c":
+		return "v3.6.38"
+	}
+	if strings.hasPrefix(version, "flac-") {
+		return "v1." + strings.trimPrefix(strings.trimPrefix(version, "flac-"), "0.")
+	}
+	if strings.hasPrefix(version, "wav-") {
+		return "v2." + strings.trimPrefix(strings.trimPrefix(version, "wav-"), "0.")
+	}
+	if strings.hasPrefix(version, "mp3-") {
+		return "v3." + strings.trimPrefix(strings.trimPrefix(version, "mp3-"), "0.")
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
