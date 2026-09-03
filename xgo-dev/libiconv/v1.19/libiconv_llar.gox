@@ -1,0 +1,83 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+id "xgo-dev/libiconv"
+
+fromVer "v1.19"
+
+filter => {
+	return slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "darwin")
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	// The v1.19 bootstrap supports Automake 1.11 through 1.18 but invokes
+	// 1.18-suffixed tools. Debian 12, for example, provides supported Automake
+	// 1.16.5 through the unversioned automake and aclocal commands.
+	for relativePath in ["Makefile.devel", filepath.join("libcharset", "Makefile.devel")] {
+		path := filepath.join(ctx.SourceDir, relativePath)
+		content := string(os.readFile(path)!)
+		content = content.replace("AUTOMAKE = automake-1.18", "AUTOMAKE = automake", 1)
+		content = content.replace("ACLOCAL = aclocal-1.18", "ACLOCAL = aclocal", 1)
+		os.writeFile(path, []byte(content), 0o644)!
+	}
+
+	autopull := filepath.join(ctx.SourceDir, "autopull.sh")
+	autogen := filepath.join(ctx.SourceDir, "autogen.sh")
+	exec! autopull, "--one-time"
+	exec! autogen
+
+	a := autotools.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	a.configure "--disable-shared", "--enable-static", "--enable-pic", "--disable-nls"
+	a.build "-j4"
+	a.install
+
+	for path in filepath.glob(filepath.join(installDir, "lib", "*.la"))! {
+		os.remove(path)!
+	}
+	os.removeAll(filepath.join(installDir, "share"))!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+	os.writeFile(filepath.join(licenseDir, "COPYING.LIB"), os.readFile(filepath.join(ctx.SourceDir, "COPYING.LIB"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+exec_prefix=$${prefix}
+libdir=$${prefix}/lib
+includedir=$${prefix}/include
+
+Name: libiconv
+Description: Convert text to and from Unicode
+Version: 1.19
+Libs: -L$${libdir} -liconv -lcharset
+Cflags: -I$${includedir}
+`
+	os.writeFile(filepath.join(pcDir, "libiconv.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libiconv")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, ctx.Proj.readFile("v1.19/consumer.c")!, 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libiconv.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libiconv")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "@"+flagsFile, "-o", binary
+	exec! binary
+}
