@@ -1,0 +1,120 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <tgc.h>
+#include <string.h>
+
+static tgc_t gc;
+
+static void example_function() {
+    char *message = tgc_alloc(&gc, 64);
+    strcpy(message, "No More Memory Leaks!");
+}
+
+int main(int argc, char **argv) {
+    tgc_start(&gc, &argc);
+
+    example_function();
+
+    tgc_stop(&gc);
+
+    return 0;
+}
+`
+
+id "orangeduck/tgc"
+
+fromVer "05354008dc0de09e0a076647b8a678aaebfa58e6"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	cmakeLists := ctx.Proj.readFile("05354008dc0de09e0a076647b8a678aaebfa58e6/CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "TGC_SRC_DIR", ctx.SourceDir
+	// Keep the installed library directory stable across platforms; GNUInstallDirs
+	// otherwise selects lib64 on some 64-bit systems.
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		// The Conan recipe enables PIC for static builds only.
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.md"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.md"))!, 0o644)!
+
+	// The upstream commit has no build files or pkg-config metadata, so this
+	// formula supplies the install recipe and a relocatable consumer interface.
+	pkgconfigDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pkgconfigDir, 0o755)!
+	pc := `prefix=$${pcfiledir}/../..
+includedir=$${prefix}/include
+libdir=$${prefix}/lib
+
+Name: tgc
+Description: Tiny garbage collector for C
+Version: 0.1.0
+Cflags: -I$${includedir}
+Libs: -L$${libdir} -ltgc
+`
+	os.writeFile(filepath.join(pkgconfigDir, "tgc.pc"), []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("tgc")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("tgc")!.fields
+	args := []string{consumer}
+	args <- flags...
+	args <- "-o", binary
+	cc! args...
+
+	shared := slices.contains(target.options["shared"], "ON")
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
