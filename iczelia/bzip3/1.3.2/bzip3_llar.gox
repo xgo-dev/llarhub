@@ -1,0 +1,102 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+id "iczelia/bzip3"
+
+// Upstream's native CMake project and installable pkg-config metadata start
+// at 1.3.2; tags before it only provide Makefile or Autotools entrypoints.
+fromVer "1.3.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"with_thread": "ON",
+	"with_util": "OFF",
+}
+
+filter => {
+	for key in []string{"shared", "fPIC", "with_thread", "with_util"} {
+		for value in target.options[key] {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := slices.contains(target.options["shared"], "ON")
+	fPIC := slices.contains(target.options["fPIC"], "ON")
+	withThread := slices.contains(target.options["with_thread"], "ON")
+	withUtil := slices.contains(target.options["with_util"], "ON")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "BZIP3_ENABLE_PTHREAD", withThread
+	// 1.3.2 defaults this upstream optimization to ON, while the Conan
+	// project wrapper leaves it disabled for reproducible, portable builds.
+	c.defineBool "BZIP3_ENABLE_ARCH_NATIVE", false
+	c.defineBool "BZIP3_BUILD_APPS", withUtil
+	c.configure
+	c.build
+	c.install
+
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "bzip3.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix=" + installDir, "prefix=$${pcfiledir}/../..", 1)
+	pc = strings.replace(pc, "exec_prefix=" + installDir, "exec_prefix=$${prefix}", 1)
+	pc = strings.replace(pc, "bindir=" + filepath.join(installDir, "bin"), "bindir=$${exec_prefix}/bin", 1)
+	pc = strings.replace(pc, "libdir=" + filepath.join(installDir, "lib"), "libdir=$${exec_prefix}/lib", 1)
+	pc = strings.replace(pc, "includedir=" + filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("bzip3")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	testSource := filepath.join(testDir, "consumer.c")
+	testBuild := filepath.join(testDir, "_build")
+	binary := filepath.join(testBuild, "consumer")
+
+	os.mkdirAll(testDir, 0755)!
+	os.writeFile(testSource, []byte(`#include "libbz3.h"
+
+int main(void) {
+    struct bz3_state *state = bz3_new(8 * 1024 * 1024);
+    if (state == 0) {
+        return 1;
+    }
+    if (bz3_version() == 0) {
+        bz3_free(state);
+        return 1;
+    }
+    bz3_free(state);
+    return 0;
+}
+`), 0644)!
+
+	pkgconfig.use installDir
+	metadata := pkgconfig.lookup("bzip3")!
+	os.writeFile(filepath.join(testDir, "CMakeLists.txt"), []byte(`cmake_minimum_required(VERSION 3.15)
+project(bzip3_consumer LANGUAGES C)
+add_executable(consumer consumer.c)
+`), 0644)!
+
+	tc := cmake.new(testDir, testBuild, "")
+	tc.use installDir
+	tc.define "CMAKE_C_FLAGS", metadata
+	tc.define "CMAKE_BUILD_RPATH", filepath.join(installDir, "lib")
+	tc.configure
+	tc.build
+	exec! binary
+}
