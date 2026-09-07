@@ -1613,6 +1613,12 @@ input {
   background: var(--accent-soft);
 }
 
+.package-install-trigger.button--ghost {
+  --button-bg-hover: rgba(255, 255, 255, 0.06);
+  --button-bg-pressed: rgba(255, 255, 255, 0.1);
+  --button-fg: #ffffff;
+}
+
 @media (max-width: 720px) {
   .package-config-tabs {
     display: flex;

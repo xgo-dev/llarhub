@@ -1,0 +1,250 @@
+[
+  {
+    "path": "hwy/abort.h",
+    "size": 338
+  },
+  {
+    "path": "hwy/aligned_allocator.h",
+    "size": 17440
+  },
+  {
+    "path": "hwy/auto_tune.h",
+    "size": 19827
+  },
+  {
+    "path": "hwy/base.h",
+    "size": 111800
+  },
+  {
+    "path": "hwy/bit_set.h",
+    "size": 11984
+  },
+  {
+    "path": "hwy/cache_control.h",
+    "size": 5222
+  },
+  {
+    "path": "hwy/contrib/algo/copy-inl.h",
+    "size": 5166
+  },
+  {
+    "path": "hwy/contrib/algo/count-inl.h",
+    "size": 15555
+  },
+  {
+    "path": "hwy/contrib/algo/find-inl.h",
+    "size": 3653
+  },
+  {
+    "path": "hwy/contrib/algo/minmax-inl.h",
+    "size": 3174
+  },
+  {
+    "path": "hwy/contrib/algo/transform-inl.h",
+    "size": 8138
+  },
+  {
+    "path": "hwy/contrib/bit_pack/bit_pack-inl.h",
+    "size": 114980
+  },
+  {
+    "path": "hwy/contrib/dot/dot-inl.h",
+    "size": 17983
+  },
+  {
+    "path": "hwy/contrib/image/image.h",
+    "size": 17282
+  },
+  {
+    "path": "hwy/contrib/math/fast_math-inl.h",
+    "size": 66296
+  },
+  {
+    "path": "hwy/contrib/math/math-inl.h",
+    "size": 61208
+  },
+  {
+    "path": "hwy/contrib/matvec/matvec-inl.h",
+    "size": 19278
+  },
+  {
+    "path": "hwy/contrib/random/random-inl.h",
+    "size": 11636
+  },
+  {
+    "path": "hwy/contrib/sort/order.h",
+    "size": 1191
+  },
+  {
+    "path": "hwy/contrib/sort/shared-inl.h",
+    "size": 7142
+  },
+  {
+    "path": "hwy/contrib/sort/sorting_networks-inl.h",
+    "size": 29131
+  },
+  {
+    "path": "hwy/contrib/sort/traits-inl.h",
+    "size": 20512
+  },
+  {
+    "path": "hwy/contrib/sort/traits128-inl.h",
+    "size": 18345
+  },
+  {
+    "path": "hwy/contrib/sort/vqsort-inl.h",
+    "size": 86378
+  },
+  {
+    "path": "hwy/contrib/sort/vqsort.h",
+    "size": 16039
+  },
+  {
+    "path": "hwy/contrib/thread_pool/futex.h",
+    "size": 9913
+  },
+  {
+    "path": "hwy/contrib/thread_pool/spin.h",
+    "size": 10902
+  },
+  {
+    "path": "hwy/contrib/thread_pool/thread_pool.h",
+    "size": 64847
+  },
+  {
+    "path": "hwy/contrib/thread_pool/topology.h",
+    "size": 5186
+  },
+  {
+    "path": "hwy/contrib/unroller/unroller-inl.h",
+    "size": 14545
+  },
+  {
+    "path": "hwy/detect_compiler_arch.h",
+    "size": 15982
+  },
+  {
+    "path": "hwy/detect_targets.h",
+    "size": 36818
+  },
+  {
+    "path": "hwy/foreach_target.h",
+    "size": 10330
+  },
+  {
+    "path": "hwy/highway_export.h",
+    "size": 2074
+  },
+  {
+    "path": "hwy/highway.h",
+    "size": 28605
+  },
+  {
+    "path": "hwy/nanobenchmark.h",
+    "size": 7053
+  },
+  {
+    "path": "hwy/ops/arm_neon-inl.h",
+    "size": 395547
+  },
+  {
+    "path": "hwy/ops/arm_sve-inl.h",
+    "size": 268428
+  },
+  {
+    "path": "hwy/ops/emu128-inl.h",
+    "size": 90190
+  },
+  {
+    "path": "hwy/ops/generic_ops-inl.h",
+    "size": 313430
+  },
+  {
+    "path": "hwy/ops/inside-inl.h",
+    "size": 23665
+  },
+  {
+    "path": "hwy/ops/loongarch_lasx-inl.h",
+    "size": 179703
+  },
+  {
+    "path": "hwy/ops/loongarch_lsx-inl.h",
+    "size": 220837
+  },
+  {
+    "path": "hwy/ops/ppc_vsx-inl.h",
+    "size": 278804
+  },
+  {
+    "path": "hwy/ops/rvv-inl.h",
+    "size": 286650
+  },
+  {
+    "path": "hwy/ops/scalar-inl.h",
+    "size": 69956
+  },
+  {
+    "path": "hwy/ops/set_macros-inl.h",
+    "size": 25845
+  },
+  {
+    "path": "hwy/ops/shared-inl.h",
+    "size": 29433
+  },
+  {
+    "path": "hwy/ops/wasm_128-inl.h",
+    "size": 233294
+  },
+  {
+    "path": "hwy/ops/x86_128-inl.h",
+    "size": 525939
+  },
+  {
+    "path": "hwy/ops/x86_256-inl.h",
+    "size": 343182
+  },
+  {
+    "path": "hwy/ops/x86_512-inl.h",
+    "size": 302276
+  },
+  {
+    "path": "hwy/ops/x86_avx3-inl.h",
+    "size": 19232
+  },
+  {
+    "path": "hwy/per_target.h",
+    "size": 1811
+  },
+  {
+    "path": "hwy/print-inl.h",
+    "size": 1936
+  },
+  {
+    "path": "hwy/print.h",
+    "size": 2100
+  },
+  {
+    "path": "hwy/profiler.h",
+    "size": 32609
+  },
+  {
+    "path": "hwy/robust_statistics.h",
+    "size": 4946
+  },
+  {
+    "path": "hwy/targets.h",
+    "size": 15830
+  },
+  {
+    "path": "hwy/timer-inl.h",
+    "size": 1450
+  },
+  {
+    "path": "hwy/timer.h",
+    "size": 9878
+  },
+  {
+    "path": "hwy/x86_cpuid.h",
+    "size": 2237
+  }
+]

@@ -1,6 +1,9 @@
 import type { Selection } from '@heroui/react'
-
-import { useEffect, useState } from 'react'
+import type { Components } from 'react-markdown'
+import type { FileContents, FileOptions } from '@pierre/diffs/react'
+import { lazy, Suspense, useEffect, useState } from 'react'
+import { hotkeysCoreFeature, selectionFeature, syncDataLoaderFeature } from '@headless-tree/core'
+import { useTree } from '@headless-tree/react'
 import {
   Avatar,
   Breadcrumbs,
@@ -10,7 +13,6 @@ import {
   Disclosure,
   Link,
   ScrollShadow,
-  Surface,
   Table,
   Tabs,
   ToggleButton,
@@ -18,22 +20,158 @@ import {
   Tooltip,
 } from '@heroui/react'
 import {
+  Boxes,
   Check,
   ChevronDown,
   ChevronLeft,
+  ChevronRight,
   Copy,
   ExternalLink,
+  FileCode2,
   FileText,
+  Folder,
+  FolderOpen,
+  GitFork,
+  Library,
+  SlidersHorizontal,
   Star,
-  X,
 } from 'lucide-react'
 import { useReducedMotion } from 'motion/react'
+import Markdown from 'react-markdown'
 
 import googleLogo from '../assets/google.png'
 import HomeFooter from '../components/HomeFooter'
 import HomeNavbar from '../components/HomeNavbar'
 import Grainient from '../components/react-bits/Grainient/Grainient'
 import SoftAurora from '../components/react-bits/SoftAurora/SoftAurora/SoftAurora'
+import './PackageContent.css'
+import installedHeaderManifest from '../data/highway-1.4.0-linux-amd64/manifest.json'
+
+const installedHeaderPrefix = '../data/highway-1.4.0-linux-amd64/include/'
+const installedHeaderURLs = import.meta.glob<string>('../data/highway-1.4.0-linux-amd64/include/**/*', {
+  query: '?url&no-inline', import: 'default', eager: true,
+})
+const HeaderCodeFile = lazy(async () => {
+  const [viewer, { preloadHighlighter }] = await Promise.all([
+    import('@pierre/diffs/react'), import('@pierre/diffs'),
+  ])
+  // Initialize before mounting: an empty first render can be reused by StrictMode hydration.
+  await preloadHighlighter({ langs: ['cpp'], themes: ['github-light'] })
+  return { default: viewer.File }
+})
+const headerCodeOptions = {
+  theme: 'github-light', themeType: 'light', disableFileHeader: true,
+  overflow: 'scroll', enableLineSelection: true,
+} satisfies FileOptions<undefined, undefined>
+
+type HeaderItem = { name: string, children: string[], isFolder: boolean, size?: number }
+const installedHeaderTree = new Map<string, HeaderItem>([
+  ['root', { name: 'include', children: [], isFolder: true }],
+])
+for (const file of installedHeaderManifest) {
+  const parts = file.path.split('/')
+  let parent = 'root'
+  for (let index = 0; index < parts.length; index++) {
+    const path = parts.slice(0, index + 1).join('/')
+    const isFolder = index < parts.length - 1
+    if (!installedHeaderTree.has(path)) {
+      installedHeaderTree.set(path, { name: parts[index], children: [], isFolder, size: isFolder ? undefined : file.size })
+      installedHeaderTree.get(parent)!.children.push(path)
+    }
+    parent = path
+  }
+}
+for (const item of installedHeaderTree.values()) {
+  item.children.sort((a, b) => {
+    const left = installedHeaderTree.get(a)!, right = installedHeaderTree.get(b)!
+    return Number(right.isFolder) - Number(left.isFolder) || left.name.localeCompare(right.name)
+  })
+}
+
+function InstalledHeaderFile({ path }: { path: string }) {
+  const url = installedHeaderURLs[installedHeaderPrefix + path]
+  const [file, setFile] = useState<FileContents | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    async function load() {
+      try {
+        const response = await fetch(url, { signal: controller.signal })
+        if (!response.ok) throw new Error(`Could not load the installed header (HTTP ${response.status}).`)
+        const contents = await response.text()
+        if (!controller.signal.aborted) setFile({ name: path, contents, lang: 'cpp' })
+      } catch (cause) {
+        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : 'Could not load the installed header.')
+      }
+    }
+    void load()
+    return () => controller.abort()
+  }, [url, path])
+
+  return <section className="package-header-file" aria-label={`Installed file include/${path}`}>
+    <div className="package-header-file-heading">
+      <code className="package-installed-header-path">include/{path}</code>
+      <div className="package-header-file-actions">
+        <Button size="sm" variant="ghost" aria-label="Copy header source" isDisabled={file === null} onPress={() => {
+          if (file !== null) void navigator.clipboard.writeText(file.contents).then(() => setCopyState('copied'), () => setCopyState('failed'))
+        }}>{copyState === 'copied' ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copyState === 'copied' ? 'Copied' : 'Copy'}</Button>
+        <Link href={url} target="_blank" rel="noreferrer">Raw<ExternalLink className="size-3" /></Link>
+      </div>
+    </div>
+    <div className="package-header-origin"><span>Build output · Linux / AMD64 · @1.4.0</span><span>Click line numbers to select</span></div>
+    {copyState === 'failed' && <p className="package-header-message" role="status">Copy failed. Select the code to copy it manually.</p>}
+    {file !== null ? <div className="package-header-code" aria-label="Installed header source" tabIndex={0}>
+      <Suspense fallback={<p className="package-header-message" role="status">Loading code viewer…</p>}><HeaderCodeFile file={file} options={headerCodeOptions} /></Suspense>
+    </div> : <p className="package-header-message" role={error ? 'alert' : 'status'}>{error ?? 'Loading installed header…'}</p>}
+  </section>
+}
+
+function InstalledHeaders() {
+  const [selectedPath, setSelectedPath] = useState<string | null>(null)
+  const [treeOpen, setTreeOpen] = useState(false)
+  const tree = useTree<HeaderItem>({
+    rootItemId: 'root',
+    dataLoader: { getItem: id => installedHeaderTree.get(id)!, getChildren: id => installedHeaderTree.get(id)!.children },
+    features: [syncDataLoaderFeature, selectionFeature, hotkeysCoreFeature],
+    getItemName: item => item.getItemData().name,
+    isItemFolder: item => item.getItemData().isFolder,
+    initialState: { expandedItems: ['hwy'] },
+    onPrimaryAction: item => { if (!item.isFolder()) setSelectedPath(item.getId()) },
+  })
+
+  return <div className="package-header-browser package-installed-headers" data-file-open={selectedPath !== null} data-tree-open={treeOpen}>
+    <div className="package-header-toolbar">
+      {selectedPath === null ? <span className="package-header-build-label"><Folder className="size-4" />include/ <span>{installedHeaderManifest.length} files</span></span>
+        : <Button className="package-header-back" size="sm" variant="ghost" onPress={() => setSelectedPath(null)}><ChevronLeft className="size-4" />All headers</Button>}
+      {selectedPath !== null && <Button size="sm" variant="ghost" aria-controls="installed-header-directory" aria-expanded={treeOpen} onPress={() => setTreeOpen(open => !open)}><Folder className="size-4" />Files</Button>}
+    </div>
+    <div className="package-header-browser-layout">
+      <div id="installed-header-directory" hidden={selectedPath !== null && !treeOpen}>
+        <div className="package-header-tree package-installed-header-tree">
+          <div className="package-installed-header-columns"><span>Header</span><span>Size</span></div>
+          <div {...tree.getContainerProps('Installed include directory')}>
+            {tree.getItems().map(item => {
+              const data = item.getItemData()
+              return <button {...item.getProps()} key={item.getKey()} type="button" className="package-installed-header-row">
+                <span className="package-installed-header-columns">
+                  <span style={{ paddingInlineStart: `${item.getItemMeta().level * 16}px` }}>
+                    {data.isFolder ? <ChevronRight className={`size-3.5 ${item.isExpanded() ? 'rotate-90' : ''}`} /> : <span className="size-3.5 shrink-0" />}
+                    {data.isFolder ? (item.isExpanded() ? <FolderOpen className="size-4" /> : <Folder className="size-4" />) : <FileCode2 className="size-4" />}
+                    <code>{data.name}</code>
+                  </span>
+                  <span>{data.size === undefined ? '' : `${(data.size / 1024).toFixed(1)} kB`}</span>
+                </span>
+              </button>
+            })}
+          </div>
+        </div>
+      </div>
+      {selectedPath !== null && <InstalledHeaderFile key={selectedPath} path={selectedPath} />}
+    </div>
+  </div>
+}
 
 const buildParameters = [
   ['HWY_ENABLE_TESTS', 'ON'],
@@ -43,6 +181,7 @@ const buildParameters = [
   ['BUILD_SHARED_LIBS', 'OFF'],
   ['CMAKE_CXX_STANDARD', '17'],
 ]
+
 
 const supportedReleases = [
   { version: '1.0.0', status: 'Minimum' },
@@ -101,6 +240,7 @@ for (let index = 0; index < supportedReleases.length;) {
   index = nextIndex
 }
 
+
 const modulePath = 'google/highway'
 
 const operatingSystems = [
@@ -115,6 +255,42 @@ const architectures = [
 ]
 
 const directDependencies: Array<{ path: string, version: string }> = []
+
+
+const readmeMarkdown = `# Efficient and performance-portable vector software
+
+Highway is a C++ library that provides portable SIMD/vector intrinsics.
+
+[Read the documentation](https://google.github.io/highway/en/master/)
+
+## Why
+
+Highway is for engineers who want to reliably and economically push the boundaries of what is possible in software across servers, mobile devices, and desktops.
+
+## How
+
+SIMD/vector instructions apply the same operation to multiple data items. Highway makes SIMD/vector programming practical according to these principles:
+
+- **Does what you expect.** Functions map closely to CPU instructions without extensive compiler transformations.
+- **Works on widely-used platforms.** The same C++17 application code targets seven architectures, including scalable vector instruction sets.
+- **Flexible to deploy.** Applications can choose the best instruction set at runtime or target one instruction set without changing their core code.
+- **Suitable for many domains.** Highway is used for image processing, compression, video analysis, linear algebra, cryptography, sorting, and random generation.
+
+## Current status
+
+Highway supports 27 targets across Arm, IBM Z, LoongArch, POWER, RISC-V, WebAssembly, and x86. Releases follow semantic versioning, and release builds are recommended over the Git tip.
+`
+
+const readmeComponents: Components = {
+  h1: ({ children }) => <h1 className="text-[clamp(30px,4vw,40px)] leading-[1.14] font-semibold tracking-[-.03em] text-[#101d3d]">{children}</h1>,
+  h2: ({ children }) => <h2 className="mt-12 border-t border-[#e2e8f3] pt-8 text-[28px] leading-[1.2] font-semibold tracking-[-.03em] text-[#101d3d]">{children}</h2>,
+  p: ({ children }) => <p className="mt-4 text-base leading-6 text-[#58709b]">{children}</p>,
+  a: ({ children, href }) => <Link className="mt-3 inline-flex text-[#0066cc]" href={href} rel="noreferrer" target="_blank">{children}<Link.Icon aria-hidden="true" /></Link>,
+  ul: ({ children }) => <ul className="mt-5 space-y-3 pl-5 text-base leading-6 text-[#58709b]">{children}</ul>,
+  li: ({ children }) => <li className="list-disc pl-1 marker:text-[#7a7a7a]">{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold text-[#101d3d]">{children}</strong>,
+}
+
 
 const supportedRangeLabel = `${supportedReleases[0].version} — ${supportedReleases[supportedReleases.length - 1].version}`
 
@@ -215,10 +391,11 @@ export default function PackagePage() {
   const [selectedVersion, setSelectedVersion] = useState(supportedReleases[supportedReleases.length - 1].version)
   const [activeRangeId, setActiveRangeId] = useState<string | null>(null)
   const [desktopVersionPickerOpen, setDesktopVersionPickerOpen] = useState(false)
-  const [activeConfiguration, setActiveConfiguration] = useState('target')
+  const [activeConfiguration, setActiveConfiguration] = useState('readme')
   const [selectedBuildOptions, setSelectedBuildOptions] = useState<Selection>(new Set())
   const [selectedOS, setSelectedOS] = useState<string | null>(null)
   const [selectedArch, setSelectedArch] = useState<string | null>(null)
+  const [headerPlatform, setHeaderPlatform] = useState('linux/amd64')
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -288,49 +465,26 @@ export default function PackagePage() {
             <Breadcrumbs.Item>highway</Breadcrumbs.Item>
           </Breadcrumbs>
 
-          <div className="grid gap-10 py-10 lg:grid-cols-[minmax(0,1.12fr)_minmax(360px,.88fr)] lg:items-center">
-            <div className="flex min-w-0 flex-col gap-6 sm:flex-row sm:items-start">
-              <Avatar className="size-[84px] shrink-0 rounded-[24px] border border-[#d9e3f2] bg-white shadow-[0_10px_28px_rgba(41,72,127,.08)]">
+          <div className="py-7 sm:py-8">
+            <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:gap-5">
+              <Avatar className="size-16 shrink-0 rounded-[20px] border border-[#d9e3f2] bg-white shadow-[0_8px_24px_rgba(41,72,127,.07)]">
                 <Avatar.Image alt="Google" loading="eager" src={googleLogo} />
                 <Avatar.Fallback>G</Avatar.Fallback>
               </Avatar>
 
-              <div className="min-w-0">
-                <div className="flex min-w-0 items-center gap-3">
-                  <h1 className="text-[clamp(34px,4.1vw,56px)] leading-none font-bold tracking-[-.052em] text-[#111b35]">google/highway</h1>
+              <div className="min-w-0 pt-0.5">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <h1 className="text-[clamp(34px,4.1vw,48px)] leading-[1.06] font-bold tracking-[-.05em] text-[#111b35]">google/highway</h1>
                   <Link aria-label="Open google/highway on GitHub" className="shrink-0 text-[#0874f8]" href="https://github.com/google/highway" rel="noreferrer" target="_blank">
-                    <ExternalLink className="size-5" />
+                    <ExternalLink className="size-4.5" />
                   </Link>
                 </div>
-                <p className="mt-4 max-w-[680px] text-base leading-7 text-[#58709b]">Performance-portable SIMD with runtime dispatch across modern CPU targets.</p>
-                <div className="mt-4 flex flex-wrap gap-2">
+                <p className="mt-2.5 max-w-[820px] text-[15px] leading-6 text-[#58709b]">Performance-portable SIMD with runtime dispatch across modern CPU targets.</p>
+                <div className="mt-3 flex flex-wrap gap-2">
                   {['C++', 'SIMD', 'Performance', 'Header-only'].map((topic) => <Chip key={topic} size="sm" variant="secondary">{topic}</Chip>)}
                 </div>
               </div>
             </div>
-
-            <Card className="min-w-0 w-full">
-              <Card.Header className="flex-row items-start justify-between gap-6">
-                <div className="min-w-0">
-                  <p className="m-0 text-[11px] font-bold tracking-[.08em] text-muted uppercase">Install with LLAR</p>
-                  <Card.Title className="mt-2 text-[22px] font-[680] tracking-[-.035em]">Selected release</Card.Title>
-                </div>
-                <Chip size="sm" variant="secondary"><span className="font-mono">@{selectedVersion}</span></Chip>
-              </Card.Header>
-              <Card.Content>
-                <Surface className="flex min-h-[68px] items-center gap-3 rounded-xl px-4 text-foreground" variant="tertiary">
-                  <span className="font-mono text-xs text-muted">$</span>
-                  <code className="min-w-0 flex-1 overflow-x-auto py-1 font-mono text-xs whitespace-nowrap [scrollbar-width:none] sm:text-sm [&::-webkit-scrollbar]:hidden">{installCommand}</code>
-                  <Tooltip delay={0}>
-                    <Button isIconOnly aria-label="Copy install command" className="shrink-0" size="sm" variant="ghost" onPress={copyCommand}>{copied ? <Check /> : <Copy />}</Button>
-                    <Tooltip.Content>{copied ? 'Copied' : 'Copy command'}</Tooltip.Content>
-                  </Tooltip>
-                </Surface>
-              </Card.Content>
-              <Card.Footer>
-                <Card.Description className="leading-6"><span className="sm:hidden">Expand the version picker below to choose another version.</span><span className="hidden sm:inline">Hover the verified range below to choose another version.</span></Card.Description>
-              </Card.Footer>
-            </Card>
           </div>
 
           <div
@@ -447,7 +601,6 @@ export default function PackagePage() {
                       onRangeChange={setActiveRangeId}
                       onVersionChange={(version) => {
                         setSelectedVersion(version)
-                        setCopied(false)
                       }}
                     />
                   </Disclosure.Body>
@@ -468,202 +621,137 @@ export default function PackagePage() {
         </div>
       </section>
 
-      <div className="package-config mx-auto w-full max-w-[1340px] px-6 py-12 2xl:px-0">
-        <Tabs
-          className="package-config-tabs"
-          orientation="vertical"
-          selectedKey={activeConfiguration}
-          variant="secondary"
-          onSelectionChange={(key) => setActiveConfiguration(String(key))}
-        >
-          <Tabs.ListContainer className="package-config-tabs__list-container">
-            <Tabs.List aria-label="Install configuration">
-              <Tabs.Tab className="package-config-tab" id="target">
-                <span className="flex min-w-0 flex-col items-start gap-1">
-                  <span className="font-medium text-foreground">Build Target</span>
-                  <span className="text-xs text-muted">{selectedOS ?? 'Any OS'} · {selectedArch ?? 'Any arch'}</span>
-                </span>
-                <Tabs.Indicator />
-              </Tabs.Tab>
-              <Tabs.Tab className="package-config-tab" id="cmake">
-                <span className="flex min-w-0 flex-col items-start gap-1">
-                  <span className="font-medium text-foreground">CMake</span>
-                  <span className="text-xs text-muted">{selectedBuildOptionCount === 0 ? 'Defaults' : `${selectedBuildOptionCount} selected`}</span>
-                </span>
-                <Tabs.Indicator />
-              </Tabs.Tab>
-              <Tabs.Tab className="package-config-tab" id="dependencies">
-                <span className="flex min-w-0 flex-col items-start gap-1">
-                  <span className="font-medium text-foreground">Dependencies</span>
-                  <span className="text-xs text-muted">{directDependencies.length === 0 ? 'None declared' : `${directDependencies.length} direct`}</span>
-                </span>
-                <Tabs.Indicator />
-              </Tabs.Tab>
-            </Tabs.List>
-          </Tabs.ListContainer>
+      <section className="package-content">
+        <div className="package-content-layout">
+          <section className="package-content-main">
+            <Tabs className="min-w-0" selectedKey={activeConfiguration} variant="secondary" onSelectionChange={(key) => setActiveConfiguration(String(key))}>
+              <Tabs.ListContainer>
+                <Tabs.List aria-label="Package content">
+                  <Tabs.Tab id="readme"><FileText className="size-4" />README<Tabs.Indicator /></Tabs.Tab>
+                  <Tabs.Tab id="headers"><FileCode2 className="size-4" />Headers{selectedVersion === '1.4.0' && headerPlatform === 'linux/amd64' && <span className="package-content-count">{installedHeaderManifest.length}</span>}<Tabs.Indicator /></Tabs.Tab>
+                  <Tabs.Tab id="dependencies"><Boxes className="size-4" />Dependencies <span className="package-content-count">{directDependencies.length}</span><Tabs.Indicator /></Tabs.Tab>
+                </Tabs.List>
+              </Tabs.ListContainer>
 
-          <Tabs.Panel className="package-config-panel" id="target">
-            <section>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <p className="m-0 text-[11px] font-bold tracking-[.08em] text-muted uppercase">Target matrix</p>
-                  <h2 className="mt-3 text-[28px] font-[680] tracking-[-.04em] text-foreground">Build Target</h2>
-                  <p className="mt-3 max-w-[520px] text-sm leading-6 text-muted">Choose an OS and architecture for the install command.</p>
+              <Tabs.Panel className="mt-0 min-w-0 p-0" id="readme">
+                <div className="package-content-source">
+                  <span><FileText className="size-3.5" /><code>README.md</code><span className="package-content-source-note">from the repository</span></span>
+                  <Link href="https://github.com/google/highway#readme" rel="noreferrer" target="_blank">View source<Link.Icon aria-hidden="true" /></Link>
                 </div>
-                <Button
-                  className="shrink-0 text-accent"
-                  isDisabled={selectedOS === null && selectedArch === null}
-                  size="sm"
-                  variant="ghost"
-                  onPress={() => {
-                    setSelectedOS(null)
-                    setSelectedArch(null)
-                    setCopied(false)
-                  }}
-                >
-                  <X className="size-3.5" />Clear target
-                </Button>
+                <article className="package-content-readme">
+                  <Markdown components={readmeComponents} skipHtml>{readmeMarkdown}</Markdown>
+                </article>
+              </Tabs.Panel>
+
+              <Tabs.Panel className="mt-8 min-w-0 p-0" id="headers">
+                <div className="package-content-heading package-headers-heading">
+                  <div><h2 className="flex items-center gap-2 text-[22px] font-semibold tracking-[-.02em] text-[#101d3d]"><Library className="size-5 text-[#58709b]" />Installed headers</h2><p className="mt-2 max-w-[560px] text-sm leading-6 text-[#58709b]">Files from the build output's <code>include/</code> directory.</p></div>
+                  <label className="package-header-platform">
+                    <span>Platform</span>
+                    <select value={headerPlatform} onChange={event => setHeaderPlatform(event.target.value)}>
+                      <option value="">Choose platform</option>
+                      {operatingSystems.map(os => <optgroup key={os.id} label={os.label}>
+                        {architectures.map(arch => <option key={arch.id} value={`${os.id}/${arch.id}`}>{os.label} / {arch.label}</option>)}
+                      </optgroup>)}
+                    </select>
+                  </label>
+                </div>
+                {selectedVersion === '1.4.0' && headerPlatform === 'linux/amd64' ? <InstalledHeaders /> : <div className="package-header-platform-empty" role="status">
+                  <Folder className="size-6" />
+                  <h3>{headerPlatform === '' ? 'Select a target platform' : 'Build headers not available'}</h3>
+                  <p>{headerPlatform === ''
+                    ? <>Headers come from the installed <code>include/</code> directory for each version and target platform.</>
+                    : <>The build output's <code>include/</code> files have not been provided for <code>{headerPlatform}</code> at <code>@{selectedVersion}</code>.</>}</p>
+                </div>}
+              </Tabs.Panel>
+
+              <Tabs.Panel className="mt-8 min-w-0 p-0" id="dependencies">
+                <div className="package-content-heading">
+                  <div><h2 className="text-[22px] font-semibold tracking-[-.02em] text-[#101d3d]">Dependencies</h2><p className="mt-2 max-w-[560px] text-sm leading-6 text-[#58709b]">Direct dependencies declared for this release.</p></div>
+                  <Chip className="shrink-0" size="sm" variant="secondary"><span className="font-mono">@{selectedVersion}</span></Chip>
+                </div>
+                <div className="overflow-hidden rounded-xl border border-[#d9e3f2] bg-white">
+                  <Table className="!rounded-none border-0 bg-transparent p-0 shadow-none" variant="secondary">
+                    <Table.ScrollContainer className="max-h-[320px] overflow-y-auto [scrollbar-width:thin]">
+                      <Table.Content aria-label={`Direct dependencies for ${modulePath}@${selectedVersion}`} className="w-full table-fixed !rounded-none">
+                        <Table.Header className="sticky top-0 z-10 bg-[#f3f6fc]"><Table.Column className="w-3/5 bg-[#f3f6fc] px-4" isRowHeader>Module</Table.Column><Table.Column className="w-2/5 bg-[#f3f6fc] px-4 text-right">Required version</Table.Column></Table.Header>
+                        <Table.Body items={directDependencies} renderEmptyState={() => <div className="flex min-h-36 items-center justify-center border-t border-[#e2e8f3] px-4 text-center text-sm text-[#58709b]">No direct dependencies declared for @{selectedVersion}.</div>}>
+                          {(dependency) => <Table.Row id={`${dependency.path}@${dependency.version}`} className="border-t border-[#e2e8f3]" textValue={`${dependency.path} ${dependency.version}`}><Table.Cell className="!rounded-none px-4 py-4"><code className="font-mono text-xs text-[#101d3d] sm:text-sm">{dependency.path}</code></Table.Cell><Table.Cell className="!rounded-none px-4 py-4 text-right"><code className="font-mono text-xs text-[#58709b] sm:text-sm">{dependency.version}</code></Table.Cell></Table.Row>}
+                        </Table.Body>
+                      </Table.Content>
+                    </Table.ScrollContainer>
+                  </Table>
+                </div>
+              </Tabs.Panel>
+            </Tabs>
+          </section>
+
+          <aside className="package-content-aside">
+            <section className="package-content-install">
+              <div className="package-content-install-body">
+                <div className="package-content-install-heading">
+                  <div><p>Install with LLAR</p><h2>Use this release</h2></div>
+                  <span>@{selectedVersion}</span>
+                </div>
+                <div className="package-content-terminal">
+                  <div className="package-content-terminal-heading">
+                    <span>Terminal</span>
+                    <Tooltip delay={0}>
+                      <Button aria-label="Copy install command" className="package-content-copy" size="sm" variant="ghost" onPress={copyCommand}>{copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}{copied ? 'Copied' : 'Copy'}</Button>
+                      <Tooltip.Content>{copied ? 'Copied' : 'Copy command'}</Tooltip.Content>
+                    </Tooltip>
+                  </div>
+                  <div className="package-content-command"><span aria-hidden="true">$</span><code>{installCommand}</code></div>
+                </div>
               </div>
 
-              <div className="mt-8 border-y border-separator">
-                <div className="grid gap-3 border-b border-separator py-5 sm:grid-cols-[72px_minmax(0,1fr)] sm:items-center">
-                  <span className="text-xs font-semibold tracking-[.06em] text-muted uppercase">OS</span>
-                  <ToggleButtonGroup
-                    fullWidth
-                    aria-label="Operating system"
-                    className="package-config-toggle"
-                    selectedKeys={selectedOS === null ? [] : [selectedOS]}
-                    selectionMode="single"
-                    size="sm"
-                    onSelectionChange={(keys) => {
-                      const [value] = Array.from(keys)
-                      setSelectedOS(value === undefined ? null : String(value))
-                      setCopied(false)
-                    }}
-                  >
-                    {operatingSystems.map(({ id, label }, index) => <ToggleButton key={id} className="font-mono text-xs" id={id}>{index > 0 && <ToggleButtonGroup.Separator />}{label}</ToggleButton>)}
-                  </ToggleButtonGroup>
-                </div>
-                <div className="grid gap-3 py-5 sm:grid-cols-[72px_minmax(0,1fr)] sm:items-center">
-                  <span className="text-xs font-semibold tracking-[.06em] text-muted uppercase">Arch</span>
-                  <ToggleButtonGroup
-                    fullWidth
-                    aria-label="Architecture"
-                    className="package-config-toggle"
-                    selectedKeys={selectedArch === null ? [] : [selectedArch]}
-                    selectionMode="single"
-                    size="sm"
-                    onSelectionChange={(keys) => {
-                      const [value] = Array.from(keys)
-                      setSelectedArch(value === undefined ? null : String(value))
-                      setCopied(false)
-                    }}
-                  >
-                    {architectures.map(({ id, label }, index) => <ToggleButton key={id} className="font-mono text-xs" id={id}>{index > 0 && <ToggleButtonGroup.Separator />}{label}</ToggleButton>)}
-                  </ToggleButtonGroup>
-                </div>
-              </div>
+              <Disclosure>
+                <Disclosure.Heading>
+                  <Button fullWidth className="package-content-customize" slot="trigger" variant="ghost">
+                    <span><SlidersHorizontal className="size-3.5" />Customize</span>
+                    <span>{selectedOS === null && selectedArch === null && selectedBuildOptionCount === 0 ? 'Defaults' : 'Custom'}<Disclosure.Indicator /></span>
+                  </Button>
+                </Disclosure.Heading>
+                <Disclosure.Content>
+                  <Disclosure.Body className="package-content-config">
+                    <div className="rounded-lg bg-white p-3 text-[#101d3d]">
+                      <div className="flex items-center justify-between gap-3"><span className="text-[11px] font-semibold tracking-[.06em] text-[#58709b] uppercase">Build target</span><Button className="h-7 min-w-0 rounded-lg px-2 text-xs" isDisabled={selectedOS === null && selectedArch === null && selectedBuildOptionCount === 0} size="sm" variant="ghost" onPress={() => { setSelectedOS(null); setSelectedArch(null); setSelectedBuildOptions(new Set()); setCopied(false) }}>Reset</Button></div>
+                      <div className="mt-3 space-y-3">
+                        <ToggleButtonGroup fullWidth aria-label="Operating system" className="overflow-hidden rounded-lg border border-[#d9e3f2]" selectedKeys={selectedOS === null ? [] : [selectedOS]} selectionMode="single" size="sm" onSelectionChange={(keys) => { const [value] = Array.from(keys); setSelectedOS(value === undefined ? null : String(value)); setCopied(false) }}>{operatingSystems.map(({ id, label }, index) => <ToggleButton key={id} className="min-w-0 rounded-none px-2 font-mono text-[10px]" id={id}>{index > 0 && <ToggleButtonGroup.Separator />}{label}</ToggleButton>)}</ToggleButtonGroup>
+                        <ToggleButtonGroup fullWidth aria-label="Architecture" className="overflow-hidden rounded-lg border border-[#d9e3f2]" selectedKeys={selectedArch === null ? [] : [selectedArch]} selectionMode="single" size="sm" onSelectionChange={(keys) => { const [value] = Array.from(keys); setSelectedArch(value === undefined ? null : String(value)); setCopied(false) }}>{architectures.map(({ id, label }, index) => <ToggleButton key={id} className="rounded-none font-mono text-[10px]" id={id}>{index > 0 && <ToggleButtonGroup.Separator />}{label}</ToggleButton>)}</ToggleButtonGroup>
+                      </div>
+                      <div className="mt-4 border-t border-[#e2e8f3] pt-3">
+                        <div className="flex items-center justify-between"><span className="text-[11px] font-semibold tracking-[.06em] text-[#58709b] uppercase">CMake</span><span className="text-[10px] text-[#7a7a7a]">{selectedBuildOptionCount} selected</span></div>
+                        <Table className="mt-2 !rounded-none border-0 bg-transparent p-0 shadow-none" variant="secondary">
+                          <Table.ScrollContainer className="max-h-[220px] overflow-y-auto [scrollbar-width:thin]">
+                            <Table.Content aria-label="Selectable build system parameters" className="!rounded-none" selectedKeys={selectedBuildOptions} selectionBehavior="toggle" selectionMode="multiple" onSelectionChange={(selection) => { setSelectedBuildOptions(selection); setCopied(false) }}>
+                              <Table.Header className="bg-white"><Table.Column className="bg-white px-1" isRowHeader>Option</Table.Column><Table.Column className="bg-white px-1 text-right">Default</Table.Column></Table.Header>
+                              <Table.Body>{buildParameters.map(([parameter, value]) => { const isSelected = selectedBuildOptionKeys.has(parameter); return <Table.Row key={parameter} className="cursor-pointer border-t border-[#e2e8f3]" id={parameter} textValue={`${parameter} ${value}`}><Table.Cell className={`!rounded-none px-1 py-2.5 ${isSelected ? 'bg-[#edf4ff]' : 'bg-white'}`}><code className="block max-w-[170px] truncate font-mono text-[9px] text-[#101d3d]">{parameter}</code></Table.Cell><Table.Cell className={`!rounded-none px-1 py-2.5 text-right font-mono text-[9px] ${isSelected ? 'bg-[#edf4ff]' : 'bg-white'}`}>{value}</Table.Cell></Table.Row> })}</Table.Body>
+                            </Table.Content>
+                          </Table.ScrollContainer>
+                        </Table>
+                      </div>
+                    </div>
+                  </Disclosure.Body>
+                </Disclosure.Content>
+              </Disclosure>
             </section>
-          </Tabs.Panel>
 
-          <Tabs.Panel className="package-config-panel" id="cmake">
-            <section>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <p className="m-0 text-[11px] font-bold tracking-[.08em] text-muted uppercase">Build-system parameters</p>
-                  <h2 className="mt-3 text-[28px] font-[680] tracking-[-.04em] text-foreground">CMake defaults</h2>
-                  <p className="mt-3 max-w-[520px] text-sm leading-6 text-muted">Select parameters to append them to the install command.</p>
-                </div>
-                <Button
-                  className="shrink-0 text-accent"
-                  isDisabled={selectedBuildOptionCount === 0}
-                  size="sm"
-                  variant="ghost"
-                  onPress={() => {
-                    setSelectedBuildOptions(new Set())
-                    setCopied(false)
-                  }}
-                >
-                  <X className="size-3.5" />Clear selection
-                </Button>
+            <section className="package-content-resources">
+              <h2>Project resources</h2>
+              <div>
+                <Link href="https://github.com/google/highway" rel="noreferrer" target="_blank"><span>Source repository<small>google/highway</small></span><Link.Icon aria-hidden="true" /></Link>
+                <Link href="https://google.github.io/highway/en/master/" rel="noreferrer" target="_blank"><span>Documentation<small>Highway documentation</small></span><Link.Icon aria-hidden="true" /></Link>
               </div>
-
-              <Table className="package-config-table mt-8 !rounded-none border-0 bg-transparent p-0 shadow-none" variant="secondary">
-                <Table.ScrollContainer className="max-h-[360px] overflow-y-auto [scrollbar-color:#b7c2d5_transparent] [&::-webkit-scrollbar]:size-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#b7c2d5] [&::-webkit-scrollbar-track]:bg-transparent">
-                  <Table.Content
-                    aria-label="Selectable build system parameters"
-                    className="!rounded-none"
-                    selectedKeys={selectedBuildOptions}
-                    selectionBehavior="toggle"
-                    selectionMode="multiple"
-                    onSelectionChange={(selection) => {
-                      setSelectedBuildOptions(selection)
-                      setCopied(false)
-                    }}
-                  >
-                    <Table.Header className="sticky top-0 z-10 bg-surface"><Table.Column className="bg-surface px-2" isRowHeader>Parameter</Table.Column><Table.Column className="bg-surface px-2 text-right">Default</Table.Column></Table.Header>
-                    <Table.Body>
-                      {buildParameters.map(([parameter, value]) => {
-                        const isSelected = selectedBuildOptionKeys.has(parameter)
-                        return (
-                          <Table.Row key={parameter} className="cursor-pointer border-t border-separator" id={parameter} textValue={`${parameter} ${value}`}>
-                            <Table.Cell className={`!rounded-none px-2 py-4 transition-colors ${isSelected ? 'bg-accent-soft' : 'bg-transparent'}`}>
-                              <span className="inline-flex items-center gap-2">
-                                <Check aria-hidden="true" className={`size-4 shrink-0 text-accent transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0'}`} />
-                                <code className={`font-mono text-xs sm:text-sm ${isSelected ? 'text-accent' : 'text-foreground'}`}>{parameter}</code>
-                              </span>
-                            </Table.Cell>
-                            <Table.Cell className={`!rounded-none px-2 py-4 text-right font-mono text-sm transition-colors ${isSelected ? 'bg-accent-soft text-accent' : 'bg-transparent text-muted'}`}>{value}</Table.Cell>
-                          </Table.Row>
-                        )
-                      })}
-                    </Table.Body>
-                  </Table.Content>
-                </Table.ScrollContainer>
-              </Table>
+              <dl>
+                <div><dt>Forks</dt><dd><GitFork className="size-3.5" />463</dd></div>
+                <div><dt>Language</dt><dd>C++</dd></div>
+              </dl>
             </section>
-          </Tabs.Panel>
+          </aside>
+        </div>
+      </section>
 
-          <Tabs.Panel className="package-config-panel" id="dependencies">
-            <section>
-              <div className="flex items-start justify-between gap-6">
-                <div>
-                  <p className="m-0 text-[11px] font-bold tracking-[.08em] text-muted uppercase">Declared requirements</p>
-                  <h2 className="mt-3 text-[28px] font-[680] tracking-[-.04em] text-foreground">Dependencies</h2>
-                  <p className="mt-3 max-w-[520px] text-sm leading-6 text-muted">Direct dependencies declared by this release. LLAR resolves them automatically.</p>
-                </div>
-                <Chip className="shrink-0" size="sm" variant="secondary"><span className="font-mono">@{selectedVersion}</span></Chip>
-              </div>
-
-              <Table className="package-config-table mt-8 !rounded-none border-0 bg-transparent p-0 shadow-none" variant="secondary">
-                <Table.ScrollContainer className="max-h-[320px] overflow-y-auto [scrollbar-color:#b7c2d5_transparent] [&::-webkit-scrollbar]:size-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#b7c2d5] [&::-webkit-scrollbar-track]:bg-transparent">
-                  <Table.Content aria-label={`Direct dependencies for ${modulePath}@${selectedVersion}`} className="w-full table-fixed !rounded-none">
-                    <Table.Header className="sticky top-0 z-10 bg-surface">
-                      <Table.Column className="w-3/5 bg-surface px-2" isRowHeader>Package</Table.Column>
-                      <Table.Column className="w-2/5 bg-surface px-2 text-right">Required version</Table.Column>
-                    </Table.Header>
-                    <Table.Body
-                      items={directDependencies}
-                      renderEmptyState={() => (
-                        <div className="flex min-h-28 items-center justify-center border-t border-separator px-4 text-center text-sm text-muted">
-                          No direct dependencies declared for @{selectedVersion}.
-                        </div>
-                      )}
-                    >
-                      {(dependency) => (
-                        <Table.Row id={`${dependency.path}@${dependency.version}`} className="border-t border-separator" textValue={`${dependency.path} ${dependency.version}`}>
-                          <Table.Cell className="!rounded-none px-2 py-4"><code className="font-mono text-xs text-foreground sm:text-sm">{dependency.path}</code></Table.Cell>
-                          <Table.Cell className="!rounded-none px-2 py-4 text-right"><code className="font-mono text-xs text-muted sm:text-sm">{dependency.version}</code></Table.Cell>
-                        </Table.Row>
-                      )}
-                    </Table.Body>
-                  </Table.Content>
-                </Table.ScrollContainer>
-              </Table>
-            </section>
-          </Tabs.Panel>
-        </Tabs>
-      </div>
 
       <HomeFooter />
     </main>
