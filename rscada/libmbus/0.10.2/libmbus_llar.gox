@@ -1,8 +1,6 @@
 import (
 	"os"
 	"path/filepath"
-	"slices"
-	"strings"
 )
 
 const consumerSource = `#include <mbus/mbus.h>
@@ -60,7 +58,11 @@ onBuild ctx => {
 
 	os.chdir(ctx.SourceDir)!
 	os.mkdirAll(filepath.join(ctx.SourceDir, "m4"), 0o755)!
-	if slices.contains(target.require["os"], "darwin") {
+
+	if target.require["os"][0] == "darwin" {
+		if err := exec("glibtoolize", "--version"); err != nil {
+			exec! "brew", "install", "libtool"
+		}
 		glibtoolize! "--copy", "--force"
 	} else {
 		libtoolize! "--copy", "--force"
@@ -85,13 +87,19 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
 
-	pcPath := filepath.join(installDir, "lib", "pkgconfig", "libmbus.pc")
-	pc := string(os.readFile(pcPath)!)
-	pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
-	pc = strings.replace(pc, "exec_prefix="+installDir, "exec_prefix=$${prefix}", 1)
-	pc = strings.replace(pc, "libdir="+filepath.join(installDir, "lib"), "libdir=$${prefix}/lib", 1)
-	pc = strings.replace(pc, "includedir="+filepath.join(installDir, "include"), "includedir=$${prefix}/include", 1)
-	os.writeFile(pcPath, []byte(pc), 0o644)!
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libmbus",
+		description = "Open source M-bus (Meter-Bus) library.",
+		version = "0.10.2",
+		URL = "http://www.rscada.se/libmbus/",
+		libs = ["-L$${libdir}", "-lmbus", "-lm"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "libmbus.pc"))!
+	pc.writeTo(out)!
+	out.close()!
 
 	pkgconfig.use installDir
 	ctx.setMetadata pkgconfig.lookup("libmbus")!
