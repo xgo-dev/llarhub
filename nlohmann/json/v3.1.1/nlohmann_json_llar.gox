@@ -1,0 +1,89 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <nlohmann/json.hpp>
+#include <string>
+
+int main() {
+    using json = nlohmann::json;
+
+    const json data = {
+        {"pi", 3.141},
+        {"happy", true},
+        {"name", "nlohmann"},
+        {"nothing", nullptr},
+        {"values", {1, 2, 3}}
+    };
+
+    if (data["pi"].get<double>() != 3.141) {
+        return 1;
+    }
+    if (!data["happy"].get<bool>()) {
+        return 2;
+    }
+    if (data["name"].get<std::string>() != "nlohmann") {
+        return 3;
+    }
+
+    const auto parsed = json::parse(R"({"name":"llar","values":[1,2,3]})");
+    if (!parsed["values"].is_array() || parsed["values"].size() != 3) {
+        return 4;
+    }
+    if (!json::accept("{\"ok\":true}")) {
+        return 5;
+    }
+    if (data.dump().empty() || parsed.dump(2).empty()) {
+        return 6;
+    }
+    return 0;
+}
+`
+
+id "nlohmann/json"
+
+fromVer "v3.1.1"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(licenseDir, 0o755)!
+
+	cp! "-R", filepath.join(ctx.SourceDir, "include", "nlohmann"), includeDir
+	cp! filepath.join(ctx.SourceDir, "LICENSE.MIT"), licenseDir
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "nlohmann_json",
+		description = "JSON for Modern C++",
+		version = "3.1.1",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "nlohmann_json.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("nlohmann_json")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "nlohmann_json.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("nlohmann_json")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
