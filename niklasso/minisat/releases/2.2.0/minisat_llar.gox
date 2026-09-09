@@ -1,0 +1,93 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+id "niklasso/minisat"
+
+fromVer "releases/2.2.0"
+
+onRequire (proj, deps) => {
+	deps.require "madler/zlib", "v1.3.1"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	formulaDir := "releases/2.2.0"
+
+	os.writeFile(
+		filepath.join(ctx.SourceDir, "CMakeLists.txt"),
+		ctx.Proj.readFile(filepath.join(formulaDir, "CMakeLists.txt"))!,
+		0o644,
+	)!
+	for patchName in ["0001-drop-default-arg-in-friend-declaration.patch", "0002-suffix-literal.patch"] {
+		patchPath := filepath.join(ctx.SourceDir, patchName)
+		os.writeFile(patchPath, ctx.Proj.readFile(filepath.join(formulaDir, "patches", patchName))!, 0o644)!
+		git! "-C", ctx.SourceDir, "apply", "--unidiff-zero", patchPath
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "MINISAT_SRC_DIR", ctx.SourceDir
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	// Keep Conan's static, PIC defaults. LLAR matrix options also reach
+	// madler/zlib, whose current Formula cannot install under an option matrix.
+	c.defineBool "BUILD_SHARED_LIBS", false
+	if !slices.contains(target.require["os"], "windows") {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+	}
+	for dep in ctx.Proj.Deps {
+		c.use ctx.outputDir(dep)
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lminisat"]
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs <- "-lm"
+	}
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "minisat",
+		description = "minimalistic SAT solver",
+		version = "releases/2.2.0",
+		requires = ["zlib"],
+		libs = libs,
+		cflags = ["-I$${includedir}", "-I$${includedir}/minisat"],
+	)!
+	out := os.create(filepath.join(pcDir, "minisat.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("minisat")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	formulaDir := "releases/2.2.0"
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, ctx.Proj.readFile(filepath.join(formulaDir, "consumer.cpp"))!, 0o644)!
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "minisat.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("minisat")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
