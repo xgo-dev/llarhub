@@ -59,12 +59,10 @@ onBuild ctx => {
 	os.chdir(ctx.SourceDir)!
 	os.mkdirAll(filepath.join(ctx.SourceDir, "m4"), 0o755)!
 
-	// Host package managers are not part of the formula. Use the libtoolize
-	// already on the runner (glibtoolize on Darwin) and fail if it is missing.
-	if target.require["os"][0] == "darwin" {
+	// GNU libtoolize is `libtoolize` on Linux and `glibtoolize` on Homebrew
+	// Darwin. Host package managers are not part of the formula.
+	if exec("libtoolize", "--copy", "--force") != nil {
 		glibtoolize! "--copy", "--force"
-	} else {
-		libtoolize! "--copy", "--force"
 	}
 	autoreconf! "-fi"
 

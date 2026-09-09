@@ -116,7 +116,7 @@ jobs:
 
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
-        run: brew install autoconf automake gperf groff
+        run: brew install autoconf automake libtool gperf groff
 
       - name: Set up Go
         uses: actions/setup-go@v7
