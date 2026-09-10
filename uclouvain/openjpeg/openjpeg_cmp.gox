@@ -1,0 +1,27 @@
+import "strings"
+
+func normalize(version string) string {
+	if version == "start" {
+		return "0.0.0"
+	}
+	if version == "opj0-97" {
+		return "0.0.1"
+	}
+	if version == "arelease" {
+		return "0.0.2"
+	}
+	if version == "wg1n6848" {
+		return "2.1.0.1"
+	}
+	if strings.hasPrefix(version, "version.") {
+		return strings.trimPrefix(version, "version.")
+	}
+	if strings.hasPrefix(version, "v") {
+		return strings.trimPrefix(version, "v")
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	return gnu.Compare(normalize(a.Version), normalize(b.Version))
+}

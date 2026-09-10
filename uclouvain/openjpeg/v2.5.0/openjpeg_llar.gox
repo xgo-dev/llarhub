@@ -1,0 +1,123 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <openjpeg.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main() {
+    printf("opj_has_thread_support: %d\n", opj_has_thread_support());
+    printf("opj_get_num_cpus: %d\n", opj_get_num_cpus());
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "uclouvain/openjpeg"
+
+fromVer "v2.5.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values := range target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_DOC", false
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "BUILD_STATIC_LIBS", !shared
+	c.defineBool "BUILD_LUTS_GENERATOR", false
+	c.defineBool "BUILD_CODEC", false
+	c.defineBool "BUILD_JPIP", false
+	c.defineBool "BUILD_VIEWER", false
+	c.defineBool "BUILD_JAVA", false
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_PKGCONFIG_FILES", false
+	c.defineBool "OPJ_DISABLE_TPSOT_FIX", false
+	c.defineBool "OPJ_USE_THREAD", true
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lopenjp2"]
+	if !shared {
+		if osName != "windows" {
+			libs <- "-lm"
+		}
+	}
+	cflags := ["-I$${includedir}/openjpeg-2.5"]
+	if osName == "windows" && !shared {
+		cflags <- "-DOPJ_STATIC"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "openjp2",
+		description = "JPEG2000 library (Part 1 and 2)",
+		version = "2.5.0",
+		libs = libs,
+		cflags = cflags,
+	)!
+	if shared {
+		pc.libs.private ["-lm"]
+	}
+	out := os.create(filepath.join(pcDir, "libopenjp2.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libopenjp2")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "consumer.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libopenjp2")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
