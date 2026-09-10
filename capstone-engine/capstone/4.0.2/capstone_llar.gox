@@ -1,0 +1,115 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <stdlib.h>
+#include <stdio.h>
+#include <capstone/capstone.h>
+
+int main() {
+    int major = 0, minor = 0;
+    cs_version(&major, &minor);
+    printf("capstone version %d.%d\n", major, minor);
+    return EXIT_SUCCESS;
+}
+`
+
+id "capstone-engine/capstone"
+
+fromVer "4.0.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"use_default_alloc": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "use_default_alloc" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	useDefaultAlloc := target.options["use_default_alloc"][0] == "ON"
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(source, "cmake_policy (SET CMP0048 OLD)", "cmake_policy (SET CMP0048 NEW)", 1)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "CAPSTONE_BUILD_STATIC", !shared
+	c.defineBool "CAPSTONE_BUILD_SHARED", shared
+	c.defineBool "CAPSTONE_BUILD_TESTS", false
+	c.defineBool "CAPSTONE_BUILD_CSTOOL", false
+	c.defineBool "CAPSTONE_USE_DEFAULT_ALLOC", useDefaultAlloc
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.TXT"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.TXT"))!, 0o644)!
+
+	cflags := ["-I$${includedir}"]
+	if shared {
+		cflags <- "-DCAPSTONE_SHARED"
+	}
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "capstone",
+		description = "Capstone disassembly engine",
+		version = "4.0.2",
+		libs = ["-L$${libdir}", "-lcapstone"],
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "capstone.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("capstone")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "capstone.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("capstone")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		if target.require["os"][0] == "windows" {
+			os.setenv("PATH", filepath.join(installDir, "bin"))!
+		}
+	}
+	exec! binary
+}
