@@ -1,0 +1,339 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <yajl/yajl_common.h>
+#include <yajl/yajl_gen.h>
+#include <yajl/yajl_parse.h>
+#include <yajl/yajl_tree.h>
+#include <yajl/yajl_version.h>
+
+#define CHK(x) do { if ((x) != yajl_gen_status_ok) return 1; } while (0)
+
+static int got_null;
+static int got_bool;
+static int got_integer;
+static int got_double;
+static int got_string;
+static int got_map;
+static int got_array;
+
+static int on_null(void *ctx) {
+    (void)ctx;
+    got_null = 1;
+    return 1;
+}
+
+static int on_boolean(void *ctx, int boolVal) {
+    (void)ctx;
+    got_bool = boolVal;
+    return 1;
+}
+
+static int on_integer(void *ctx, long long integerVal) {
+    (void)ctx;
+    if (integerVal == 4) {
+        got_integer = 1;
+    }
+    return 1;
+}
+
+static int on_double(void *ctx, double doubleVal) {
+    (void)ctx;
+    if (doubleVal > 3.0 && doubleVal < 4.0) {
+        got_double = 1;
+    }
+    return 1;
+}
+
+static int on_string(void *ctx, const unsigned char *stringVal, size_t stringLen) {
+    (void)ctx;
+    if (stringLen == 4 && memcmp(stringVal, "yajl", 4) == 0) {
+        got_string = 1;
+    }
+    return 1;
+}
+
+static int on_start_map(void *ctx) {
+    (void)ctx;
+    got_map = 1;
+    return 1;
+}
+
+static int on_map_key(void *ctx, const unsigned char *key, size_t stringLen) {
+    (void)ctx;
+    (void)key;
+    (void)stringLen;
+    return 1;
+}
+
+static int on_end_map(void *ctx) {
+    (void)ctx;
+    return 1;
+}
+
+static int on_start_array(void *ctx) {
+    (void)ctx;
+    got_array = 1;
+    return 1;
+}
+
+static int on_end_array(void *ctx) {
+    (void)ctx;
+    return 1;
+}
+
+static int generate_sample(unsigned char **outBuf, size_t *outLen) {
+    yajl_gen yg = yajl_gen_alloc(NULL);
+    const unsigned char *buf;
+    size_t len;
+
+    if (yg == NULL) {
+        return 1;
+    }
+    yajl_gen_config(yg, yajl_gen_beautify, 1);
+    yajl_gen_config(yg, yajl_gen_indent_string, "  ");
+    yajl_gen_config(yg, yajl_gen_validate_utf8, 1);
+
+    CHK(yajl_gen_map_open(yg));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"name", 4));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"yajl", 4));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"star", 4));
+    CHK(yajl_gen_integer(yg, 4));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"pi", 2));
+    CHK(yajl_gen_double(yg, 3.5));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"exact", 5));
+    CHK(yajl_gen_number(yg, "2", 1));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"ok", 2));
+    CHK(yajl_gen_bool(yg, 1));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"empty", 5));
+    CHK(yajl_gen_null(yg));
+    CHK(yajl_gen_string(yg, (const unsigned char *)"hits", 4));
+    CHK(yajl_gen_array_open(yg));
+    CHK(yajl_gen_integer(yg, 2));
+    CHK(yajl_gen_integer(yg, 1));
+    CHK(yajl_gen_array_close(yg));
+    CHK(yajl_gen_map_close(yg));
+
+    if (yajl_gen_map_close(yg) != yajl_gen_generation_complete) {
+        yajl_gen_free(yg);
+        return 1;
+    }
+    if (yajl_gen_get_buf(yg, &buf, &len) != yajl_gen_status_ok || buf == NULL || len == 0) {
+        yajl_gen_free(yg);
+        return 1;
+    }
+
+    *outBuf = malloc(len + 1);
+    if (*outBuf == NULL) {
+        yajl_gen_free(yg);
+        return 1;
+    }
+    memcpy(*outBuf, buf, len);
+    (*outBuf)[len] = 0;
+    *outLen = len;
+    yajl_gen_clear(yg);
+    yajl_gen_free(yg);
+    return 0;
+}
+
+int main(void) {
+    static const yajl_callbacks callbacks = {
+        on_null,
+        on_boolean,
+        on_integer,
+        on_double,
+        NULL,
+        on_string,
+        on_start_map,
+        on_map_key,
+        on_end_map,
+        on_start_array,
+        on_end_array,
+    };
+    const char json[] =
+        "{\"name\":\"yajl\",\"star\":4,\"pi\":3.5,\"exact\":2,\"ok\":true,\"empty\":null,\"hits\":[2,1]}";
+    const char *path[] = {"name", NULL};
+    unsigned char *generated = NULL;
+    size_t generatedLen = 0;
+    yajl_handle hand;
+    yajl_status stat;
+    yajl_val node;
+    yajl_val name;
+    char errbuf[128];
+
+    printf("Welcome to YAJL v%d.%d.%d!\n", YAJL_MAJOR, YAJL_MINOR, YAJL_MICRO);
+    if (yajl_version() != YAJL_VERSION) {
+        return 1;
+    }
+    if (YAJL_MAX_DEPTH <= 0) {
+        return 1;
+    }
+
+    if (generate_sample(&generated, &generatedLen) != 0) {
+        return 1;
+    }
+
+    hand = yajl_alloc(&callbacks, NULL, NULL);
+    if (hand == NULL) {
+        free(generated);
+        return 1;
+    }
+    yajl_config(hand, yajl_dont_validate_strings, 0);
+    stat = yajl_parse(hand, generated, generatedLen);
+    if (stat == yajl_status_ok) {
+        stat = yajl_complete_parse(hand);
+    }
+    if (stat != yajl_status_ok) {
+        unsigned char *err = yajl_get_error(hand, 1, generated, generatedLen);
+        fprintf(stderr, "parse failed (%s): %s\n", yajl_status_to_string(stat), err);
+        yajl_free_error(hand, err);
+        yajl_free(hand);
+        free(generated);
+        return 1;
+    }
+    if (yajl_get_bytes_consumed(hand) == 0) {
+        yajl_free(hand);
+        free(generated);
+        return 1;
+    }
+    yajl_free(hand);
+    free(generated);
+
+    if (!got_null || !got_bool || !got_integer || !got_double || !got_string || !got_map || !got_array) {
+        fprintf(stderr, "parser callbacks missed public events\n");
+        return 1;
+    }
+
+    node = yajl_tree_parse(json, errbuf, sizeof(errbuf));
+    if (node == NULL) {
+        fprintf(stderr, "tree parse failed: %s\n", errbuf);
+        return 1;
+    }
+    name = yajl_tree_get(node, path, yajl_t_string);
+    if (!YAJL_IS_STRING(name) || strcmp(YAJL_GET_STRING(name), "yajl") != 0) {
+        yajl_tree_free(node);
+        return 1;
+    }
+    if (!YAJL_IS_OBJECT(node)) {
+        yajl_tree_free(node);
+        return 1;
+    }
+    yajl_tree_free(node);
+    return 0;
+}
+`
+
+id "lloyd/yajl"
+
+fromVer "2.1.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	for subdir, targetName in {"reformatter": "json_reformat", "verify": "json_verify"} {
+		path := filepath.join(ctx.SourceDir, subdir, "CMakeLists.txt")
+		text := string(os.readFile(path)!)
+		text = text.replace(
+			"GET_TARGET_PROPERTY(binPath ${targetName} LOCATION)",
+			"SET(binPath $$<TARGET_FILE:${targetName}>)",
+			1,
+		)
+		os.writeFile(path, []byte(text), 0o644)!
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "CMAKE_MACOSX_RPATH", true
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	os.removeAll(filepath.join(installDir, "share"))!
+
+	pattern := "*yajl.*"
+	if shared {
+		pattern = "*yajl_s.*"
+	}
+	for dir in ["lib", "bin"] {
+		for path in filepath.glob(filepath.join(installDir, dir, pattern))! {
+			os.remove(path)!
+		}
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	library := "yajl_s"
+	cflags := ["-I$${includedir}"]
+	if shared {
+		library = "yajl"
+		cflags <- "-DYAJL_SHARED"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "yajl",
+		description = "A Portable JSON parsing and serialization library in ANSI C",
+		version = "2.1.0",
+		libs = ["-L$${libdir}", "-l"+library],
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "yajl.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("yajl")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "yajl.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("yajl")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
