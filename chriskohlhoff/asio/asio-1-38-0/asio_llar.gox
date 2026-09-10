@@ -1,0 +1,83 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <asio.hpp>
+
+int main()
+{
+    auto && service = asio::io_context{};
+    (void)service;
+}
+`
+
+func copyHeaders(src, dst string) {
+	os.mkdirAll(dst, 0o755)!
+	for entry in os.readDir(src)! {
+		from := filepath.join(src, entry.name)
+		to := filepath.join(dst, entry.name)
+		if entry.isDir {
+			copyHeaders from, to
+			continue
+		}
+		if entry.name.hasSuffix(".hpp") || entry.name.hasSuffix(".ipp") {
+			os.writeFile(to, os.readFile(from)!, 0o644)!
+		}
+	}
+}
+
+id "chriskohlhoff/asio"
+
+// asio-1-38-0 moved the public tree and license out of the asio subdirectory
+// and removed the deprecated io_service alias used by earlier releases.
+fromVer "asio-1-38-0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	copyHeaders filepath.join(ctx.SourceDir, "include"), includeDir
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE_1_0.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE_1_0.txt"))!, 0o644)!
+
+	libs := []string{}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs <- "-lpthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "asio",
+		description = "Asio C++ library",
+		version = "asio-1-38-0",
+		libs = libs,
+		cflags = ["-I$${includedir}", "-DASIO_STANDALONE"],
+	)!
+	out := os.create(filepath.join(pcDir, "asio.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("asio")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "asio.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("asio")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
