@@ -1,0 +1,119 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <iostream>
+#include <keystone/keystone.h>
+
+int main()
+{
+    unsigned int major = 0, minor = 0;
+    ks_version(&major, &minor);
+    std::cout << "Keystone version: " << major << "." << minor << std::endl;
+    return EXIT_SUCCESS;
+}
+`
+
+id "keystone-engine/keystone"
+
+fromVer "0.9.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	osName := target.require["os"][0]
+	if osName != "linux" && osName != "darwin" {
+		return false
+	}
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	cmakeSource := string(os.readFile(cmakeLists)!)
+	cmakeSource = strings.replace(cmakeSource, "  cmake_policy(SET CMP0051 OLD)", "  # cmake_policy(SET CMP0051 OLD)", 1)
+	os.writeFile(cmakeLists, []byte(cmakeSource), 0o644)!
+
+	llvmLists := filepath.join(ctx.SourceDir, "llvm", "CMakeLists.txt")
+	llvmSource := string(os.readFile(llvmLists)!)
+	llvmSource = strings.replace(llvmSource, "  cmake_policy(SET CMP0051 OLD)", "  # cmake_policy(SET CMP0051 OLD)", 1)
+	os.writeFile(llvmLists, []byte(llvmSource), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_LIBS_ONLY", true
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "LLVM_ENABLE_PIC", fPIC
+	c.configure
+	c.build "--target", "keystone"
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	for name in ["COPYING", "EXCEPTIONS-CLIENT", "LICENSE-COM.TXT"] {
+		os.writeFile(filepath.join(licenseDir, name), os.readFile(filepath.join(ctx.SourceDir, name))!, 0o644)!
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "keystone",
+		description = "Keystone assembler engine",
+		version = "0.9.2",
+		libs = ["-L$${libdir}", "-lkeystone"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "keystone.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("keystone")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "keystone.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("keystone")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++14", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		libDir := filepath.join(installDir, "lib")
+		if target.require["os"][0] == "linux" {
+			os.setenv("LD_LIBRARY_PATH", libDir)!
+		} else {
+			os.setenv("DYLD_LIBRARY_PATH", libDir)!
+		}
+	}
+	exec! binary
+}
