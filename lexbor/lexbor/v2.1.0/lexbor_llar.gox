@@ -1,0 +1,131 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <lexbor/core/base.h>
+#include <lexbor/core/types.h>
+#include <lexbor/html/parser.h>
+#include <lexbor/html/serialize.h>
+
+int main(void) {
+    lxb_html_document_t *document = lxb_html_document_create();
+    lxb_html_document_destroy(document);
+    return 0;
+}
+`
+
+id "lexbor/lexbor"
+
+fromVer "v2.1.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	if target.require["os"][0] != "linux" && target.require["os"][0] != "darwin" {
+		return false
+	}
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(source, `    set(CMAKE_INSTALL_NAME_DIR ${CMAKE_INSTALL_FULL_LIBDIR})
+`, "", 1)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "LEXBOR_BUILD_SHARED", shared
+	c.defineBool "LEXBOR_BUILD_STATIC", !shared
+	c.defineBool "LEXBOR_BUILD_SEPARATELY", false
+	c.defineBool "LEXBOR_INSTALL_HEADERS", true
+	c.defineBool "LEXBOR_BUILD_TESTS", false
+	c.defineBool "LEXBOR_BUILD_TESTS_CPP", false
+	c.defineBool "LEXBOR_BUILD_EXAMPLES", false
+	c.defineBool "LEXBOR_BUILD_UTILS", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}"]
+	cflags := ["-I$${includedir}"]
+	if shared {
+		libs <- "-llexbor"
+	} else {
+		libs <- "-llexbor_static"
+		cflags <- "-DLEXBOR_STATIC"
+	}
+	if osName == "linux" {
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "lexbor",
+		description = "Lexbor HTML renderer library",
+		version = "v2.1.0",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "lexbor.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("lexbor")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "lexbor.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("lexbor")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		libDir := filepath.join(installDir, "lib")
+		if target.require["os"][0] == "darwin" {
+			exec! {"DYLD_LIBRARY_PATH": libDir}, binary
+		} else {
+			exec! {"LD_LIBRARY_PATH": libDir}, binary
+		}
+	} else {
+		exec! binary
+	}
+}
