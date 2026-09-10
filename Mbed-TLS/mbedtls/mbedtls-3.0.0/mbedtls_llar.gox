@@ -1,0 +1,135 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include "mbedtls/version.h"
+
+#include <stdio.h>
+
+int main(void)
+{
+    char mbedtls_version[18];
+    mbedtls_version_get_string_full(mbedtls_version);
+    printf("version: %s\n", mbedtls_version);
+    return 0;
+}
+`
+
+id "Mbed-TLS/mbedtls"
+
+fromVer "mbedtls-3.0.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"enable_threading": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "enable_threading" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	osName := target.require["os"][0]
+	if osName == "windows" {
+		if target.options["shared"][0] == "ON" || target.options["enable_threading"][0] == "ON" {
+			return false
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	enableThreading := target.options["enable_threading"][0] == "ON"
+	osName := target.require["os"][0]
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "USE_SHARED_MBEDTLS_LIBRARY", shared
+	c.defineBool "USE_STATIC_MBEDTLS_LIBRARY", !shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "ENABLE_PROGRAMS", false
+	c.defineBool "ENABLE_TESTING", false
+	c.defineBool "MBEDTLS_FATAL_WARNINGS", false
+	c.defineBool "CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS", true
+
+	cFlags := ""
+	if enableThreading {
+		if cFlags != "" {
+			cFlags += " "
+		}
+		cFlags += "-DMBEDTLS_THREADING_C=1 -DMBEDTLS_THREADING_PTHREAD=1"
+	}
+	if cFlags != "" {
+		c.define "CMAKE_C_FLAGS", cFlags
+	}
+
+	_, err := os.stat(filepath.join(ctx.SourceDir, ".gitmodules"))
+	if err == nil {
+		git! "submodule", "update", "--init", "--recursive"
+	} else if !os.isNotExist(err) {
+		panic err
+	}
+
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lmbedtls", "-lmbedx509", "-lmbedcrypto"]
+	if enableThreading && (osName == "linux" || osName == "freebsd") {
+		libs <- "-lpthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "mbedtls",
+		description = "Mbed TLS is a C library that implements cryptographic primitives, X.509 certificate manipulation and the SSL/TLS and DTLS protocols.",
+		version = "mbedtls-3.0.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "mbedtls.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("mbedtls")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "mbedtls.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("mbedtls")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
