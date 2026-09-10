@@ -1,0 +1,10 @@
+func normalize(version string) string {
+	if version == "1.0.0alpha1" {
+		return "1.0.0~alpha1"
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	return gnu.Compare(normalize(a.Version), normalize(b.Version))
+}
