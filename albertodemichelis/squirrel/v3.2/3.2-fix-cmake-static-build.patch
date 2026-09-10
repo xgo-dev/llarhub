@@ -1,0 +1,7 @@
+diff --git a/sq/CMakeLists.txt b/sq/CMakeLists.txt
+index bdea07d..f7629a3 100644
+--- a/sq/CMakeLists.txt
++++ b/sq/CMakeLists.txt
+@@ -19 +19 @@
+-  add_executable(squirrel::interpreter_static ALIAS sq)
++  add_executable(squirrel::interpreter_static ALIAS sq_static)
