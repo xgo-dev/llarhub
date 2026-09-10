@@ -1,0 +1,271 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <octomap/octomap.h>
+#include <octomap/math/Utils.h>
+
+int main() {
+    octomap::OcTree tree(0.05);
+    tree.enableChangeDetection(true);
+    octomap::point3d origin(0.01f, 0.01f, 0.02f);
+    octomap::point3d point(4.01f, 0.01f, 0.01f);
+    tree.insertRay(origin, point);
+    tree.updateNode(octomap::point3d(2.01f, 0.01f, 0.01f), 2.0f);
+    return tree.size() == 0;
+}
+`
+
+func srcCMakeListsSource() string {
+	return `SET (octomap_SRCS
+  AbstractOcTree.cpp
+  AbstractOccupancyOcTree.cpp
+  Pointcloud.cpp
+  ScanGraph.cpp
+  CountingOcTree.cpp
+  OcTree.cpp
+  OcTreeNode.cpp
+  OcTreeStamped.cpp
+  ColorOcTree.cpp
+  )
+
+if(BUILD_SHARED_LIBS)
+ADD_LIBRARY( octomap SHARED $${octomap_SRCS})
+set_target_properties( octomap PROPERTIES
+  VERSION $${OCTOMAP_VERSION}
+  SOVERSION $${OCTOMAP_SOVERSION}
+)
+TARGET_LINK_LIBRARIES(octomap octomath)
+else()
+ADD_LIBRARY( octomap-static STATIC $${octomap_SRCS})
+SET_TARGET_PROPERTIES(octomap-static PROPERTIES OUTPUT_NAME "octomap")
+add_dependencies(octomap-static octomath-static)
+TARGET_LINK_LIBRARIES(octomap-static octomath-static)
+endif()
+
+if(NOT EXISTS "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap")
+  file(MAKE_DIRECTORY "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap")
+endif()
+
+if(BUILD_SHARED_LIBS)
+export(TARGETS octomap
+  APPEND FILE "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap/octomap-targets.cmake")
+else()
+export(TARGETS octomap-static
+  APPEND FILE "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap/octomap-targets.cmake")
+endif()
+
+if(BUILD_SHARED_LIBS)
+install(TARGETS octomap
+  EXPORT octomap-targets
+  INCLUDES DESTINATION include
+  $${INSTALL_TARGETS_DEFAULT_ARGS}
+)
+else()
+install(TARGETS octomap-static
+  EXPORT octomap-targets
+  INCLUDES DESTINATION include
+  $${INSTALL_TARGETS_DEFAULT_ARGS}
+)
+endif()
+install(EXPORT octomap-targets DESTINATION share/octomap/)
+`
+}
+
+func mathCMakeListsSource() string {
+	return `SET (octomath_SRCS
+  Vector3.cpp
+  Quaternion.cpp
+  Pose6D.cpp
+ )
+
+if(BUILD_SHARED_LIBS)
+ADD_LIBRARY( octomath SHARED $${octomath_SRCS})
+SET_TARGET_PROPERTIES( octomath PROPERTIES
+  VERSION $${OCTOMAP_VERSION}
+  SOVERSION $${OCTOMAP_SOVERSION}
+)
+else()
+ADD_LIBRARY( octomath-static STATIC $${octomath_SRCS})
+SET_TARGET_PROPERTIES(octomath-static PROPERTIES OUTPUT_NAME "octomath")
+endif()
+
+if(NOT EXISTS "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap")
+  file(MAKE_DIRECTORY "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap")
+endif()
+
+if(BUILD_SHARED_LIBS)
+export(TARGETS octomath
+  APPEND FILE "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap/octomap-targets.cmake")
+else()
+export(TARGETS octomath-static
+  APPEND FILE "$${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octomap/octomap-targets.cmake")
+endif()
+
+if(BUILD_SHARED_LIBS)
+install(TARGETS octomath
+  EXPORT octomap-targets
+  INCLUDES DESTINATION include
+  $${INSTALL_TARGETS_DEFAULT_ARGS}
+)
+else()
+install(TARGETS octomath-static
+  EXPORT octomap-targets
+  INCLUDES DESTINATION include
+  $${INSTALL_TARGETS_DEFAULT_ARGS}
+)
+endif()
+`
+}
+
+id "OctoMap/octomap"
+
+fromVer "v1.9.3"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"openmp": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "openmp" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	if target.options["openmp"][0] == "ON" && slices.contains(target.require["os"], "darwin") {
+		return false
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	openmp := target.options["openmp"][0] == "ON"
+	sourceDir := filepath.join(ctx.SourceDir, "octomap")
+
+	cmakeLists := filepath.join(sourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(source, `IF(WIN32)
+  set(OCTOMAP_LIBRARY
+    "$${CMAKE_IMPORT_LIBRARY_PREFIX}octomap$${CMAKE_IMPORT_LIBRARY_SUFFIX}"
+  )
+  set(OCTOMATH_LIBRARY
+    "$${CMAKE_IMPORT_LIBRARY_PREFIX}octomath$${CMAKE_IMPORT_LIBRARY_SUFFIX}"
+  )
+ELSE()
+  set(OCTOMAP_LIBRARY
+    "$${CMAKE_SHARED_LIBRARY_PREFIX}octomap$${CMAKE_SHARED_LIBRARY_SUFFIX}"
+  )
+  set(OCTOMATH_LIBRARY
+    "$${CMAKE_SHARED_LIBRARY_PREFIX}octomath$${CMAKE_SHARED_LIBRARY_SUFFIX}"
+  )
+ENDIF()`, `IF(BUILD_SHARED_LIBS)
+  IF(WIN32)
+    set(OCTOMAP_LIBRARY
+      "$${CMAKE_IMPORT_LIBRARY_PREFIX}octomap$${CMAKE_IMPORT_LIBRARY_SUFFIX}"
+    )
+    set(OCTOMATH_LIBRARY
+      "$${CMAKE_IMPORT_LIBRARY_PREFIX}octomath$${CMAKE_IMPORT_LIBRARY_SUFFIX}"
+    )
+  ELSE()
+    set(OCTOMAP_LIBRARY
+      "$${CMAKE_SHARED_LIBRARY_PREFIX}octomap$${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    )
+    set(OCTOMATH_LIBRARY
+      "$${CMAKE_SHARED_LIBRARY_PREFIX}octomath$${CMAKE_SHARED_LIBRARY_SUFFIX}"
+    )
+  ENDIF()
+ELSE()
+  set(OCTOMAP_LIBRARY
+    "$${CMAKE_STATIC_LIBRARY_PREFIX}octomap$${CMAKE_STATIC_LIBRARY_SUFFIX}"
+  )
+  set(OCTOMATH_LIBRARY
+    "$${CMAKE_STATIC_LIBRARY_PREFIX}octomath$${CMAKE_STATIC_LIBRARY_SUFFIX}"
+  )
+ENDIF()`, 1)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	if !fPIC {
+		compilerSettings := filepath.join(sourceDir, "CMakeModules", "CompilerSettings.cmake")
+		source = string(os.readFile(compilerSettings)!)
+		source = strings.replace(source, `ADD_DEFINITIONS(-fPIC)
+`, "", 1)
+		os.writeFile(compilerSettings, []byte(source), 0o644)!
+	}
+
+	srcCMakeLists := filepath.join(sourceDir, "src", "CMakeLists.txt")
+	os.writeFile(srcCMakeLists, []byte(srcCMakeListsSource()), 0o644)!
+
+	mathCMakeLists := filepath.join(sourceDir, "src", "math", "CMakeLists.txt")
+	os.writeFile(mathCMakeLists, []byte(mathCMakeListsSource()), 0o644)!
+
+	c := cmake.new(sourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_CXX_STANDARD", "11"
+	c.defineBool "CMAKE_SKIP_RPATH", true
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "OCTOMAP_OMP", openmp
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(sourceDir, "LICENSE.txt"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-loctomap", "-loctomath"]
+	if slices.contains(target.require["os"], "linux") {
+		libs <- "-lm"
+	}
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "octomap",
+		description = "An Efficient Probabilistic 3D Mapping Framework Based on Octrees.",
+		version = "v1.9.3",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "octomap.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("octomap")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "octomap.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("octomap")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
