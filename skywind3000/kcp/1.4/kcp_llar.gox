@@ -1,0 +1,219 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <ikcp.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_PACKETS 64
+#define MAX_PACKET 2048
+
+typedef struct {
+	char data[MAX_PACKETS][MAX_PACKET];
+	int len[MAX_PACKETS];
+	int count;
+} channel;
+
+typedef struct {
+	channel *output;
+} conn;
+
+static int net_output(const char *buf, int len, ikcpcb *kcp, void *user) {
+	conn *c = (conn *)user;
+	(void)kcp;
+	if (c->output->count >= MAX_PACKETS || len < 0 || len > MAX_PACKET) {
+		return -1;
+	}
+	memcpy(c->output->data[c->output->count], buf, (size_t)len);
+	c->output->len[c->output->count] = len;
+	c->output->count++;
+	return 0;
+}
+
+static void drain(ikcpcb *kcp, channel *ch) {
+	for (int i = 0; i < ch->count; i++) {
+		if (ikcp_input(kcp, ch->data[i], ch->len[i]) < 0) {
+			fprintf(stderr, "ikcp_input failed\n");
+			exit(1);
+		}
+	}
+	ch->count = 0;
+}
+
+int main(void) {
+	channel net1 = {0};
+	channel net2 = {0};
+	conn c1 = {&net2};
+	conn c2 = {&net1};
+
+	ikcp_allocator(malloc, free);
+
+	ikcpcb *kcp1 = ikcp_create(0x11223344, &c1);
+	ikcpcb *kcp2 = ikcp_create(0x11223344, &c2);
+	if (kcp1 == NULL || kcp2 == NULL) {
+		fprintf(stderr, "ikcp_create failed\n");
+		return 1;
+	}
+
+	ikcp_setoutput(kcp1, net_output);
+	ikcp_setoutput(kcp2, net_output);
+
+	if (ikcp_getconv(kcp1) != 0x11223344) {
+		fprintf(stderr, "ikcp_getconv mismatch\n");
+		return 1;
+	}
+	if (ikcp_wndsize(kcp1, 128, 128) != 0 || ikcp_wndsize(kcp2, 128, 128) != 0) {
+		fprintf(stderr, "ikcp_wndsize failed\n");
+		return 1;
+	}
+	if (ikcp_nodelay(kcp1, 1, 10, 2, 1) != 0 || ikcp_nodelay(kcp2, 1, 10, 2, 1) != 0) {
+		fprintf(stderr, "ikcp_nodelay failed\n");
+		return 1;
+	}
+	if (ikcp_setmtu(kcp1, 1400) != 0 || ikcp_setmtu(kcp2, 1400) != 0) {
+		fprintf(stderr, "ikcp_setmtu failed\n");
+		return 1;
+	}
+
+	const char *msg = "hello-kcp";
+	int msgLen = (int)strlen(msg);
+	if (ikcp_send(kcp1, msg, msgLen) < 0) {
+		fprintf(stderr, "ikcp_send failed\n");
+		return 1;
+	}
+
+	char recvbuf[64];
+	int got = -1;
+	for (IUINT32 t = 0; t < 2000; t += 10) {
+		ikcp_update(kcp1, t);
+		ikcp_update(kcp2, t);
+		ikcp_flush(kcp1);
+		drain(kcp2, &net2);
+		ikcp_flush(kcp2);
+		drain(kcp1, &net1);
+		(void)ikcp_check(kcp1, t);
+		(void)ikcp_waitsnd(kcp1);
+		if (ikcp_peeksize(kcp2) > 0) {
+			got = ikcp_recv(kcp2, recvbuf, (int)sizeof(recvbuf));
+			if (got > 0) {
+				break;
+			}
+		}
+	}
+
+	if (got != msgLen || memcmp(recvbuf, msg, (size_t)got) != 0) {
+		fprintf(stderr, "roundtrip failed got=%d\n", got);
+		return 1;
+	}
+
+	ikcp_release(kcp1);
+	ikcp_release(kcp2);
+	printf("kcp ok\n");
+	return 0;
+}
+`
+
+id "skywind3000/kcp"
+
+fromVer "1.4"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	// Upstream v1.4 declares a STATIC target. Rewrite it only for the public
+	// shared option; the default static build can use the source unchanged.
+	if shared {
+		cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+		source := string(os.readFile(cmakeLists)!)
+		source = strings.replace(source, "add_library(kcp STATIC ikcp.c)", "add_library(kcp ikcp.c)", 1)
+		if !strings.contains(source, "LIBRARY DESTINATION") {
+			source = strings.replace(source, "ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}", "ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}\n    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}\n    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}", 1)
+		}
+		// 1.7.1+ raise cmake_minimum_required to 4.0 without using CMake 4 features.
+		source = strings.replace(source, "CMAKE_MINIMUM_REQUIRED(VERSION 4.0)", "CMAKE_MINIMUM_REQUIRED(VERSION 3.5)", 1)
+		os.writeFile(cmakeLists, []byte(source), 0o644)!
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	// 1.4-1.7 declare cmake_minimum_required(VERSION 2.6); CMake 4 needs a floor.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "kcp",
+		description = "A Fast and Reliable ARQ Protocol",
+		version = "1.4",
+		URL = "https://github.com/skywind3000/kcp",
+		libs = ["-L$${libdir}", "-lkcp"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "kcp.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("kcp")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "kcp.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("kcp")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
