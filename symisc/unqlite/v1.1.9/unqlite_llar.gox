@@ -1,0 +1,243 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <unqlite.h>
+
+#include <stdio.h>
+#include <string.h>
+
+static int discard_output(const void *pOut, unsigned int nLen, void *pUserData) {
+	(void)pOut;
+	(void)nLen;
+	(void)pUserData;
+	return UNQLITE_OK;
+}
+
+int main(int argc, char **argv) {
+	unqlite *pDb;
+	unqlite_kv_cursor *pCur;
+	unqlite_vm *pVm;
+	unqlite_value *pVal;
+	const char *zPath;
+	const char *zVersion;
+	const char *zSig;
+	const char *zIdent;
+	const char *zCopyright;
+	const char *zJx9;
+	char zBuf[64];
+	char zKey[12];
+	char zMsg[64];
+	unqlite_int64 nBuf;
+	int found;
+	int rc;
+
+	zVersion = unqlite_lib_version();
+	zSig = unqlite_lib_signature();
+	zIdent = unqlite_lib_ident();
+	zCopyright = unqlite_lib_copyright();
+	if (zVersion == NULL || zVersion[0] == '\0') {
+		return 1;
+	}
+	if (zSig == NULL || zSig[0] == '\0') {
+		return 1;
+	}
+	if (zIdent == NULL || zIdent[0] == '\0') {
+		return 1;
+	}
+	if (zCopyright == NULL || zCopyright[0] == '\0') {
+		return 1;
+	}
+	if (unqlite_lib_is_threadsafe()) {
+		fprintf(stderr, "default amalgamation must omit mutexes\n");
+		return 1;
+	}
+
+	zPath = argc > 1 ? argv[1] : ":mem:";
+	rc = unqlite_open(&pDb, zPath, UNQLITE_OPEN_CREATE);
+	if (rc != UNQLITE_OK) {
+		return 1;
+	}
+
+	rc = unqlite_kv_store(pDb, "test", -1, "Hello World", 11);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	nBuf = (unqlite_int64)sizeof(zBuf);
+	rc = unqlite_kv_fetch(pDb, "test", -1, zBuf, &nBuf);
+	if (rc != UNQLITE_OK || nBuf != 11 || memcmp(zBuf, "Hello World", 11) != 0) {
+		unqlite_close(pDb);
+		return 1;
+	}
+
+	rc = unqlite_kv_store_fmt(pDb, "date", -1, "Current date: %d:%d:%d", 2013, 6, 7);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	rc = unqlite_kv_append(pDb, "msg", -1, "Hello, ", 7);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	rc = unqlite_kv_append(pDb, "msg", -1, "Current time is: ", 17);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	rc = unqlite_kv_append_fmt(pDb, "msg", -1, "%d:%d:%d", 10, 16, 53);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	nBuf = (unqlite_int64)sizeof(zMsg);
+	rc = unqlite_kv_fetch(pDb, "msg", -1, zMsg, &nBuf);
+	if (rc != UNQLITE_OK || nBuf != 32 || memcmp(zMsg, "Hello, Current time is: 10:16:53", 32) != 0) {
+		unqlite_close(pDb);
+		return 1;
+	}
+
+	unqlite_util_random_string(pDb, zKey, sizeof(zKey));
+	rc = unqlite_kv_store(pDb, zKey, (int)sizeof(zKey), "rnd", 3);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	(void)unqlite_util_random_num(pDb);
+
+	rc = unqlite_kv_cursor_init(pDb, &pCur);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	found = 0;
+	for (unqlite_kv_cursor_first_entry(pCur); unqlite_kv_cursor_valid_entry(pCur); unqlite_kv_cursor_next_entry(pCur)) {
+		found++;
+	}
+	unqlite_kv_cursor_release(pDb, pCur);
+	if (found < 3) {
+		unqlite_close(pDb);
+		return 1;
+	}
+
+	unqlite_kv_delete(pDb, "test", -1);
+	nBuf = (unqlite_int64)sizeof(zBuf);
+	rc = unqlite_kv_fetch(pDb, "test", -1, zBuf, &nBuf);
+	if (rc != UNQLITE_NOTFOUND) {
+		unqlite_close(pDb);
+		return 1;
+	}
+
+	zJx9 = "if( !db_exists('users') ){"
+		"  $rc = db_create('users');"
+		"  if ( !$rc ){ $ok = 0; return; }"
+		"}"
+		"$rc = db_store('users', { name : 'robert', age : 35 });"
+		"if( !$rc ){ $ok = 0; return; }"
+		"$rec = db_fetch('users');"
+		"$ok = ($rec.age == 35);"
+		"$x = 40 + 2;";
+	rc = unqlite_compile(pDb, zJx9, (int)strlen(zJx9), &pVm);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	unqlite_vm_config(pVm, UNQLITE_VM_CONFIG_OUTPUT, discard_output, 0);
+	rc = unqlite_vm_exec(pVm);
+	if (rc != UNQLITE_OK) {
+		unqlite_vm_release(pVm);
+		unqlite_close(pDb);
+		return 1;
+	}
+	pVal = unqlite_vm_extract_variable(pVm, "x");
+	if (pVal == NULL || unqlite_value_to_int(pVal) != 42) {
+		unqlite_vm_release(pVm);
+		unqlite_close(pDb);
+		return 1;
+	}
+	pVal = unqlite_vm_extract_variable(pVm, "ok");
+	if (pVal == NULL || !unqlite_value_to_bool(pVal)) {
+		unqlite_vm_release(pVm);
+		unqlite_close(pDb);
+		return 1;
+	}
+	unqlite_vm_release(pVm);
+
+	rc = unqlite_begin(pDb);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+	rc = unqlite_kv_store(pDb, "tx", -1, "1", 1);
+	if (rc != UNQLITE_OK) {
+		unqlite_rollback(pDb);
+		unqlite_close(pDb);
+		return 1;
+	}
+	rc = unqlite_commit(pDb);
+	if (rc != UNQLITE_OK) {
+		unqlite_close(pDb);
+		return 1;
+	}
+
+	unqlite_close(pDb);
+	unqlite_lib_shutdown();
+	return 0;
+}
+`
+
+id "symisc/unqlite"
+
+fromVer "v1.1.9"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	// cmake_minimum_required(VERSION 3.0.0) is below CMake 4's floor.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	// Upstream ADD_LIBRARY(... STATIC ...) ignores BUILD_SHARED_LIBS. Keep
+	// PIC so the static archive matches Conan's default fPIC=True.
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+
+	c.configure
+	c.build
+	c.install
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "unqlite",
+		description = "An Embedded NoSQL, Transactional Database Engine.",
+		version = "v1.1.9",
+		URL = "https://unqlite.org",
+		libs = ["-L$${libdir}", "-lunqlite"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "unqlite.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("unqlite")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "unqlite.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("unqlite")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary, filepath.join(testDir, "test.db")
+}
