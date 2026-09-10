@@ -1,0 +1,17 @@
+{
+  "path": "wdas/ptex",
+  "deps": {
+    "v2.4.0": [
+      {
+        "path": "madler/zlib",
+        "version": "v1.3.1"
+      }
+    ],
+    "v2.4.2": [
+      {
+        "path": "madler/zlib",
+        "version": "v1.3.1"
+      }
+    ]
+  }
+}
