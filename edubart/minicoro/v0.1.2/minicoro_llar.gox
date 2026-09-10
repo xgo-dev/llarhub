@@ -1,0 +1,87 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#define MINICORO_IMPL
+#include "minicoro.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <assert.h>
+
+void coro_entry(mco_coro* co) {
+    printf("coroutine 1\n");
+    mco_yield(co);
+    printf("coroutine 2\n");
+}
+
+int main(void) {
+    mco_desc desc = mco_desc_init(coro_entry, 0);
+    desc.user_data = NULL;
+    mco_coro* co;
+    mco_result res = mco_create(&co, &desc);
+    assert(res == MCO_SUCCESS);
+    assert(mco_status(co) == MCO_SUSPENDED);
+
+    res = mco_resume(co);
+    assert(res == MCO_SUCCESS);
+    assert(mco_status(co) == MCO_SUSPENDED);
+
+    res = mco_resume(co);
+    assert(res == MCO_SUCCESS);
+    assert(mco_status(co) == MCO_DEAD);
+
+    res = mco_destroy(co);
+    assert(res == MCO_SUCCESS);
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "edubart/minicoro"
+
+fromVer "v0.1.2"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include", "minicoro")
+	os.mkdirAll(includeDir, 0o755)!
+	os.writeFile(filepath.join(includeDir, "minicoro.h"), os.readFile(filepath.join(ctx.SourceDir, "minicoro.h"))!, 0o644)!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "minicoro",
+		description = "Single header stackful cross-platform coroutine library in pure C",
+		version = "v0.1.2",
+		cflags = ["-I$${includedir}/minicoro"],
+	)!
+	out := os.create(filepath.join(pcDir, "minicoro.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("minicoro")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "minicoro.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("minicoro")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c99", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
