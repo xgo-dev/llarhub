@@ -1,0 +1,11 @@
+{
+  "path": "niklasso/minisat",
+  "deps": {
+    "releases/2.2.0": [
+      {
+        "path": "madler/zlib",
+        "version": "v1.3.1"
+      }
+    ]
+  }
+}
