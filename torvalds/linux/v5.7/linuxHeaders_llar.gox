@@ -1,0 +1,42 @@
+import (
+    "os"
+    "path/filepath"
+)
+
+id "torvalds/linux"
+
+// Linux 5.7 introduced LLVM=1 for both target tools and host Clang.
+fromVer "v5.7"
+
+filter => {
+    return target.require["os"][0] == "linux" &&
+        (target.require["arch"][0] == "amd64" || target.require["arch"][0] == "arm64")
+}
+
+onBuild ctx => {
+    arch := "x86"
+    if target.require["arch"][0] == "arm64" {
+        arch = "arm64"
+    }
+    a := autotools.new(ctx.SourceDir, ctx.SourceDir, ctx.outputDir)
+    a.build "headers_install", "ARCH="+arch, "LLVM=1", "INSTALL_HDR_PATH="+ctx.outputDir+"/usr"
+}
+
+onTest ctx => {
+    triple := "x86_64-linux-gnu"
+    readNumber := "0"
+    if target.require["arch"][0] == "arm64" {
+        triple = "aarch64-linux-gnu"
+        readNumber = "63"
+    }
+    source := filepath.join(ctx.SourceDir, "headers-consumer.c")
+    os.writeFile! source, []byte(`#include <asm/unistd.h>
+#include <linux/futex.h>
+#include <linux/netlink.h>
+_Static_assert(__NR_read == EXPECT_NR_READ, "wrong architecture headers");
+_Static_assert(sizeof(struct nlmsghdr) == 16, "invalid netlink ABI");
+_Static_assert(sizeof(__u64) == 8, "invalid UAPI integer size");
+`), 0o644
+    clang! "--target="+triple, "-fsyntax-only", "-nostdinc",
+        "-I"+filepath.join(ctx.outputDir, "usr", "include"), "-DEXPECT_NR_READ="+readNumber, source
+}
