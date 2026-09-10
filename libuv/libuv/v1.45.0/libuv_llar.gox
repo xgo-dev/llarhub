@@ -1,0 +1,210 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <string.h>
+#include <uv.h>
+#include <uv/version.h>
+
+static int timer_fired;
+
+static void on_timer(uv_timer_t *handle) {
+    timer_fired++;
+    uv_timer_stop(handle);
+}
+
+int main(void) {
+    unsigned int version = uv_version();
+    const char *version_string = uv_version_string();
+    if (version == 0 || version_string == NULL || strlen(version_string) == 0) {
+        return 1;
+    }
+    if (UV_VERSION_HEX == 0) {
+        return 2;
+    }
+
+    uv_loop_t loop;
+    if (uv_loop_init(&loop) != 0) {
+        return 3;
+    }
+
+    uv_timer_t timer;
+    if (uv_timer_init(&loop, &timer) != 0) {
+        uv_loop_close(&loop);
+        return 4;
+    }
+    if (uv_timer_start(&timer, on_timer, 1, 0) != 0) {
+        uv_close((uv_handle_t *)&timer, NULL);
+        uv_run(&loop, UV_RUN_DEFAULT);
+        uv_loop_close(&loop);
+        return 5;
+    }
+    if (uv_run(&loop, UV_RUN_DEFAULT) != 0 || timer_fired != 1) {
+        uv_close((uv_handle_t *)&timer, NULL);
+        uv_run(&loop, UV_RUN_DEFAULT);
+        uv_loop_close(&loop);
+        return 6;
+    }
+    uv_close((uv_handle_t *)&timer, NULL);
+    uv_run(&loop, UV_RUN_DEFAULT);
+
+    if (uv_hrtime() == 0) {
+        uv_loop_close(&loop);
+        return 7;
+    }
+
+    struct sockaddr_in addr;
+    if (uv_ip4_addr("127.0.0.1", 8080, &addr) != 0) {
+        uv_loop_close(&loop);
+        return 8;
+    }
+
+    uv_mutex_t mutex;
+    if (uv_mutex_init(&mutex) != 0) {
+        uv_loop_close(&loop);
+        return 9;
+    }
+    uv_mutex_lock(&mutex);
+    uv_mutex_unlock(&mutex);
+    uv_mutex_destroy(&mutex);
+
+    char cwd[1024];
+    size_t cwd_size = sizeof(cwd);
+    if (uv_cwd(cwd, &cwd_size) != 0) {
+        uv_loop_close(&loop);
+        return 10;
+    }
+
+    uv_lib_t lib;
+    if (uv_dlopen("libuv-llar-missing", &lib) == 0) {
+        uv_dlclose(&lib);
+    }
+
+    char host[256];
+    size_t host_size = sizeof(host);
+    if (uv_os_gethostname(host, &host_size) != 0) {
+        uv_loop_close(&loop);
+        return 11;
+    }
+
+    size_t rss = 0;
+    if (uv_resident_set_memory(&rss) != 0 || rss == 0) {
+        uv_loop_close(&loop);
+        return 12;
+    }
+
+    uv_interface_address_t *interfaces = NULL;
+    int interface_count = 0;
+    if (uv_interface_addresses(&interfaces, &interface_count) == 0) {
+        uv_free_interface_addresses(interfaces, interface_count);
+    }
+
+    if (uv_loop_close(&loop) != 0) {
+        return 13;
+    }
+    return 0;
+}
+`
+
+id "libuv/libuv"
+
+fromVer "v1.45.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "LIBUV_BUILD_SHARED", shared
+	c.defineBool "LIBUV_BUILD_TESTS", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	libs := ["-L$${libdir}", "-luv"]
+	cflags := ["-I$${includedir}"]
+	if shared {
+		cflags <- "-DUSING_UV_SHARED=1"
+	}
+	if osName == "linux" || osName == "freebsd" {
+		libs <- ["-lpthread", "-ldl", "-lrt"]...
+	} else if osName == "darwin" {
+		libs <- "-lpthread"
+	} else if osName == "windows" {
+		libs <- ["-lpsapi", "-luser32", "-ladvapi32", "-liphlpapi", "-luserenv", "-lws2_32", "-ldbghelp", "-lole32", "-lshell32"]...
+	}
+
+	pcName := "libuv-static"
+	if shared {
+		pcName = "libuv"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.removeAll(pcDir)!
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = pcName,
+		description = "multi-platform support library with a focus on asynchronous I/O.",
+		version = "v1.45.0",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, pcName+".pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup(pcName)!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pcName := "libuv-static"
+	if target.options["shared"][0] == "ON" {
+		pcName = "libuv"
+	}
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, pcName+".flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup(pcName)!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
