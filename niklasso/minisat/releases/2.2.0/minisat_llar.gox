@@ -41,6 +41,7 @@ onBuild ctx => {
 	// not match absolute Main.o paths passed by the LLAR source workspace.
 	objects := []string{
 		filepath.join(ctx.SourceDir, "core", "Solver.o"),
+		filepath.join(ctx.SourceDir, "simp", "SimpSolver.o"),
 		filepath.join(ctx.SourceDir, "utils", "Options.o"),
 		filepath.join(ctx.SourceDir, "utils", "System.o"),
 	}

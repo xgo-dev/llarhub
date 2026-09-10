@@ -1,10 +1,10 @@
 // Example adapted from the Conan Center test package.
-#include <minisat/core/Solver.h>
+#include <minisat/simp/SimpSolver.h>
 
 using namespace Minisat;
 
 int main() {
-    Solver solver;
+    SimpSolver solver;
     Var a = solver.newVar();
     Var b = solver.newVar();
     Var c = solver.newVar();
