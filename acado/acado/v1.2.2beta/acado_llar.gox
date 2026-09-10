@@ -1,0 +1,335 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+var (
+	codegenSource = `#include <acado/acado_code_generation.hpp>
+#include <cstdlib>
+
+USING_NAMESPACE_ACADO
+
+int main(int argc, char *argv[])
+{
+  const double dt = 0.1;
+  const int N = 10;
+  const int Ni = 1;
+
+  DifferentialState pos_x;
+  DifferentialState pos_y;
+  DifferentialState velocity;
+  DifferentialState heading;
+
+  Control acceleration;
+  Control steering_angle;
+
+  DifferentialEquation kinematics;
+  kinematics << dot(pos_x) == velocity * cos(heading);
+  kinematics << dot(pos_y) == velocity * sin(heading);
+  kinematics << dot(velocity) == acceleration;
+  kinematics << dot(heading) == velocity * steering_angle;
+
+  OCP control_problem(0.0, N * dt, N);
+
+  control_problem.subjectTo(kinematics);
+
+  control_problem.subjectTo(-1.0 <= heading <= 1.0);
+  control_problem.subjectTo(0.0 <= velocity <= 30.0);
+  control_problem.subjectTo(-1.0 <= steering_angle <= 1.0);
+  control_problem.setNOD(3);
+
+  control_problem.subjectTo(-3.0 <= acceleration <= 3.0);
+
+  Function observation;
+  observation << velocity;
+  observation << steering_angle;
+  observation << acceleration;
+
+  BMatrix weights = eye<bool>(observation.getDim());
+
+  control_problem.minimizeLSQ(weights, observation);
+
+  Function terminal_observation;
+  terminal_observation << velocity;
+
+  BMatrix terminal_weights = eye<bool>(terminal_observation.getDim());
+
+  control_problem.minimizeLSQEndTerm(terminal_weights, terminal_observation);
+
+  OCPexport mpc(control_problem);
+  mpc.set(INTEGRATOR_TYPE, INT_RK4);
+  mpc.set(NUM_INTEGRATOR_STEPS, N * Ni);
+  mpc.set(QP_SOLVER, QP_QPOASES);
+  mpc.set(HESSIAN_APPROXIMATION, GAUSS_NEWTON);
+  mpc.set(DISCRETIZATION_TYPE, MULTIPLE_SHOOTING);
+  mpc.set(GENERATE_TEST_FILE, NO);
+  mpc.set(GENERATE_MAKE_FILE, NO);
+  mpc.set(HOTSTART_QP, YES);
+  mpc.set(SPARSE_QP_SOLUTION, CONDENSING);
+  mpc.set(FIX_INITIAL_STATE, YES);
+  mpc.set(CG_USE_VARIABLE_WEIGHTING_MATRIX, YES);
+
+  if (mpc.exportCode(argv[1]) != SUCCESSFUL_RETURN)
+  {
+    return EXIT_FAILURE;
+  }
+
+  return EXIT_SUCCESS;
+}
+`
+
+testSource = `#include <acado_auxiliary_functions.h>
+#include <acado_common.h>
+#include <cstdlib>
+
+ACADOvariables acadoVariables;
+ACADOworkspace acadoWorkspace;
+
+int main()
+{
+    acado_initializeSolver();
+
+    acado_preparationStep();
+
+    for (std::size_t iter{0}; iter < 10U; ++iter)
+    {
+        acado_feedbackStep();
+        acado_preparationStep();
+    }
+
+    return EXIT_SUCCESS;
+}
+`
+
+testCMake = `cmake_minimum_required(VERSION 3.15)
+project(acado_test_package LANGUAGES C CXX)
+
+set(CODEGEN_DIR $${CMAKE_CURRENT_BINARY_DIR}/generated_code)
+set(QPOASES_DIR "@QPOASES_DIR@")
+set(ACADO_FLAGS "@ACADO_FLAGS@")
+set(ACADO_LIB_DIR "@LIB_DIR@")
+separate_arguments(ACADO_FLAGS NATIVE_COMMAND "$${ACADO_FLAGS}")
+
+add_executable(codegen codegen.cpp)
+target_compile_features(codegen PRIVATE cxx_std_11)
+target_compile_options(codegen PRIVATE $${ACADO_FLAGS})
+target_link_options(codegen PRIVATE $${ACADO_FLAGS})
+set_target_properties(codegen PROPERTIES BUILD_RPATH "$${ACADO_LIB_DIR}")
+
+set(CODEGEN_FILES
+    $${CODEGEN_DIR}/acado_common.h
+    $${CODEGEN_DIR}/acado_solver.c
+    $${CODEGEN_DIR}/acado_integrator.c
+    $${CODEGEN_DIR}/acado_qpoases_interface.hpp
+    $${CODEGEN_DIR}/acado_qpoases_interface.cpp
+    $${CODEGEN_DIR}/acado_auxiliary_functions.h
+    $${CODEGEN_DIR}/acado_auxiliary_functions.c
+)
+
+add_custom_command(
+  OUTPUT $${CODEGEN_FILES}
+  COMMAND $$<TARGET_FILE:codegen> $${CODEGEN_DIR}
+  WORKING_DIRECTORY $${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS codegen)
+
+set(QPOASES_SOURCES
+    $${QPOASES_DIR}/SRC/Bounds.cpp
+    $${QPOASES_DIR}/SRC/CyclingManager.cpp
+    $${QPOASES_DIR}/SRC/MessageHandling.cpp
+    $${QPOASES_DIR}/SRC/QProblem.cpp
+    $${QPOASES_DIR}/SRC/Utils.cpp
+    $${QPOASES_DIR}/SRC/Constraints.cpp
+    $${QPOASES_DIR}/SRC/Indexlist.cpp
+    $${QPOASES_DIR}/SRC/QProblemB.cpp
+    $${QPOASES_DIR}/SRC/SubjectTo.cpp
+    $${QPOASES_DIR}/SRC/EXTRAS/SolutionAnalysis.cpp
+)
+
+add_library(mpc_codegen STATIC $${CODEGEN_FILES} $${QPOASES_SOURCES})
+target_include_directories(mpc_codegen PUBLIC
+    $${CODEGEN_DIR}
+    $${QPOASES_DIR}
+    $${QPOASES_DIR}/INCLUDE
+    $${QPOASES_DIR}/SRC)
+
+add_executable(test_package test_package.cpp)
+target_link_libraries(test_package PRIVATE mpc_codegen)
+`
+
+)
+
+id "acado/acado"
+
+fromVer "v1.2.2beta"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"codegen_only": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "codegen_only" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return target.options["codegen_only"][0] == "ON"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+	arch := target.require["arch"][0]
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(source, "CMAKE_MINIMUM_REQUIRED( VERSION 2.8 )", "CMAKE_MINIMUM_REQUIRED( VERSION 3.15 )", 1)
+	source = strings.replace(source, "CMAKE_POLICY(SET CMP0026 OLD)", "CMAKE_POLICY(SET CMP0026 NEW)", 1)
+	source = strings.replace(source, "CMAKE_POLICY(SET CMP0042 OLD)", "CMAKE_POLICY(SET CMP0042 NEW)", 1)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	declarationPath := filepath.join(ctx.SourceDir, "acado", "code_generation", "export_function_declaration.cpp")
+	declaration := string(os.readFile(declarationPath)!)
+	declaration = strings.replace(
+		declaration,
+		"BEGIN_NAMESPACE_ACADO\n\n\n//",
+		"BEGIN_NAMESPACE_ACADO\n\nconst ExportFunction& _ff = ExportFunction();\n//",
+		1,
+	)
+	declaration = strings.replace(declaration, "f( ExportFunction() )", "f( _ff )", 1)
+	os.writeFile(declarationPath, []byte(declaration), 0o644)!
+
+	templatePath := filepath.join(ctx.SourceDir, "acado", "code_generation", "export_templated_file.cpp")
+	templateSource := string(os.readFile(templatePath)!)
+	templateSource = strings.replace(
+		templateSource,
+		"#include <acado/code_generation/templates/templates.hpp>\n",
+		"#include <acado/code_generation/templates/templates.hpp>\n\n#include <cstdlib>\n",
+		1,
+	)
+	templateSource = strings.replace(
+		templateSource,
+		"\tfolders = TEMPLATE_PATHS;",
+		"\tif(const char* template_paths = std::getenv(\"ACADO_TEMPLATE_PATHS\"))\n\t{\n\t\tfolders = template_paths;\n\t}\n\telse\n\t{\n\t\tfolders = TEMPLATE_PATHS;\n\t}",
+		1,
+	)
+	os.writeFile(templatePath, []byte(templateSource), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.defineBool "ACADO_BUILD_SHARED", shared
+	c.defineBool "ACADO_BUILD_STATIC", !shared
+	c.defineBool "ACADO_BUILD_CGT_ONLY", true
+	c.defineBool "ACADO_WITH_EXAMPLES", false
+	c.defineBool "ACADO_WITH_TESTING", false
+	c.defineBool "ACADO_DEVELOPER", false
+	c.defineBool "ACADO_INTERNAL", false
+	c.define "CMAKE_CXX_STANDARD", "11"
+	c.define "CMAKE_C_FLAGS", "-w"
+	c.define "CMAKE_CXX_FLAGS", "-w"
+	if osName == "darwin" && arch == "arm64" {
+		c.define "CMAKE_C_FLAGS", "-w -DEIGEN_DONT_VECTORIZE -DLINUX"
+		c.define "CMAKE_CXX_FLAGS", "-w -DEIGEN_DONT_VECTORIZE -DLINUX"
+	}
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	if !shared {
+		libDir := filepath.join(installDir, "lib")
+		casadi := filepath.glob(filepath.join(ctx.SourceDir, "_build", "lib", "libacado_casadi*"))!
+		if casadi.len != 1 {
+			panic "expected one built acado_casadi library"
+		}
+		os.writeFile(filepath.join(libDir, filepath.base(casadi[0])), os.readFile(casadi[0])!, 0o644)!
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!, 0o644)!
+
+	libs := ["-L$${libdir}"]
+	if shared {
+		libs <- "-lacado_toolkit_s"
+	} else {
+		libs <- "-lacado_toolkit"
+		libs <- "-lacado_casadi"
+	}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "acado",
+		description = "Toolkit for Automatic Control and Dynamic Optimization",
+		version = "1.2.2beta",
+		libs = libs,
+		cflags = ["-I$${includedir}", "-I$${includedir}/acado"],
+	)!
+	out := os.create(filepath.join(pcDir, "acado.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("acado")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_acado_test")
+	testBuild := filepath.join(testDir, "_build")
+	os.mkdirAll(testDir, 0o755)!
+
+	os.writeFile(filepath.join(testDir, "codegen.cpp"), []byte(codegenSource), 0o644)!
+	os.writeFile(filepath.join(testDir, "test_package.cpp"), []byte(testSource), 0o644)!
+	templateDir := filepath.join(installDir, "include", "acado", "code_generation", "templates")
+	os.setenv("ACADO_TEMPLATE_PATHS", templateDir)!
+	installedQpOASES := filepath.join(installDir, "share", "acado", "external_packages", "qpoases")
+	testQpOASES := filepath.join(testDir, "qpoases")
+	filepath.walkDir(installedQpOASES, (sourcePath, entry, err) => {
+		if err != nil {
+			return err
+		}
+		if entry.isDir {
+			return nil
+		}
+		relativePath := filepath.rel(installedQpOASES, sourcePath)!
+		destinationPath := filepath.join(testQpOASES, relativePath)
+		os.mkdirAll(filepath.dir(destinationPath), 0o755)!
+		os.writeFile(destinationPath, os.readFile(sourcePath)!, 0o644)!
+		return nil
+	})!
+	testCMakeSource := strings.replace(testCMake, "@QPOASES_DIR@", testQpOASES, -1)
+	pkgconfig.use installDir
+	flags := pkgconfig.lookup("acado")!
+	testCMakeSource = strings.replace(testCMakeSource, "@ACADO_FLAGS@", flags, -1)
+	testCMakeSource = strings.replace(testCMakeSource, "@LIB_DIR@", filepath.join(installDir, "lib"), -1)
+	os.writeFile(filepath.join(testDir, "CMakeLists.txt"), []byte(testCMakeSource), 0o644)!
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	tc := cmake.new(testDir, testBuild, "")
+	tc.buildType "Release"
+	tc.use installDir
+	tc.configure
+	tc.build
+
+	exec! filepath.join(testBuild, "test_package")
+}
