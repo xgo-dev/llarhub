@@ -1,0 +1,76 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "rapidjson/document.h"
+#include "rapidjson/writer.h"
+#include "rapidjson/stringbuffer.h"
+
+#include <iostream>
+
+using namespace rapidjson;
+
+int main() {
+    const char* json = "{\"working\":\"false\"}";
+    Document d;
+    d.Parse(json);
+
+    Value& w = d["working"];
+    w.SetString("true", 4);
+
+    StringBuffer buffer;
+    Writer<StringBuffer> writer(buffer);
+    d.Accept(writer);
+
+    std::cout << buffer.GetString() << std::endl;
+    return 0;
+}
+`
+
+id "Tencent/rapidjson"
+
+fromVer "v1.0.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+	cp! "-R", filepath.join(ctx.SourceDir, "include", "rapidjson"), includeDir
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	cp! filepath.join(ctx.SourceDir, "license.txt"), filepath.join(licenseDir, "license.txt")
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "RapidJSON",
+		description = "A fast JSON parser/generator for C++ with both SAX/DOM style API",
+		version = "1.0.0",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "RapidJSON.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("RapidJSON")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "RapidJSON.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("RapidJSON")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
