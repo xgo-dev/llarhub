@@ -1,0 +1,12 @@
+import "strings"
+
+func normalize(version string) string {
+	if strings.hasSuffix(version, "_RC1") {
+		return strings.replace(version, "_RC1", "-rc1", 1)
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
