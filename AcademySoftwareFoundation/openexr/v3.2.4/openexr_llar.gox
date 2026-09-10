@@ -1,0 +1,160 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <cstdio>
+#include <ImfHeader.h>
+#include <ImfRgbaFile.h>
+#include <openexr_base.h>
+
+int main() {
+    const char* path = "openexr-consumer.exr";
+    Imf::Header header(2, 2);
+    Imf::Rgba pixels[4] = {};
+    pixels[0].r = 1.0f;
+    pixels[1].g = 1.0f;
+    pixels[2].b = 1.0f;
+    pixels[3].a = 1.0f;
+
+    {
+        Imf::RgbaOutputFile output(path, header, Imf::WRITE_RGBA);
+        output.setFrameBuffer(pixels, 1, 2);
+        output.writePixels(2);
+    }
+
+    Imf::Rgba decoded[4] = {};
+    {
+        Imf::RgbaInputFile input(path);
+        input.setFrameBuffer(decoded, 1, 2);
+        input.readPixels(0, 1);
+    }
+
+    int major = 0;
+    int minor = 0;
+    int patch = 0;
+    const char* extra = nullptr;
+    exr_get_library_version(&major, &minor, &patch, &extra);
+
+    std::remove(path);
+    return major != 3 || minor < 2 || patch < 0 || decoded[0].r != 1.0f
+               ? 1
+               : 0;
+}
+`
+
+id "AcademySoftwareFoundation/openexr"
+
+fromVer "v3.2.4"
+
+filter => {
+	osValues := target.require["os"]
+	if len(osValues) == 0 {
+		return false
+	}
+	osName := osValues[0]
+	if osName != "linux" && osName != "darwin" {
+		return false
+	}
+	return len(target.options) == 0
+}
+
+onRequire (_, deps) => {
+	deps.require "madler/zlib", "v1.3.1"
+	deps.require "AcademySoftwareFoundation/Imath", "v3.1.12"
+	deps.require "ebiggers/libdeflate", "v1.19"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	patchPath := filepath.join(ctx.SourceDir, "gcc5-bug-workaround.patch")
+	os.writeFile(patchPath, ctx.Proj.readFile("v3.2.4/gcc5-bug-workaround.patch")!, 0o644)!
+	patch! "-p1", "--batch", "--forward", "-i", patchPath
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	for dep in ctx.Proj.Deps {
+		c.use ctx.outputDir(dep)
+	}
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "OPENEXR_BUILD_TOOLS", false
+	c.defineBool "OPENEXR_INSTALL_TOOLS", false
+	c.defineBool "OPENEXR_BUILD_EXAMPLES", false
+	c.defineBool "OPENEXR_BUILD_PYTHON", false
+	c.defineBool "OPENEXR_INSTALL_DOCS", false
+	c.defineBool "OPENEXR_INSTALL_PKG_CONFIG", false
+	c.configure
+	c.build "--target", "OpenEXR", "OpenEXRUtil", "OpenEXRCore", "Iex", "IlmThread"
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.md"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.md"))!, 0o644)!
+
+	libDir := filepath.join(installDir, "lib")
+	libs := ["-L$${libdir}"]
+	for library in ["OpenEXR", "OpenEXRUtil", "OpenEXRCore", "Iex", "IlmThread"] {
+		stem := ""
+		for entry in os.readDir(libDir)! {
+			if entry.isDir {
+				continue
+			}
+			name := entry.name
+			if !name.hasPrefix("lib"+library+"-") || !name.hasSuffix(".a") {
+				continue
+			}
+			candidate := name.trimPrefix("lib").trimSuffix(".a")
+			if stem == "" || candidate.len < stem.len {
+				stem = candidate
+			}
+		}
+		if stem == "" {
+			panic "OpenEXR did not install lib"+library
+		}
+		libs <- "-l"+stem
+	}
+	libs = append(libs, "-pthread", "-lm")
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "OpenEXR",
+		description = "OpenEXR image library",
+		version = "3.2.4",
+		requires = ["Imath", "zlib", "libdeflate"],
+		libs = libs,
+		cflags = append(["-I$${includedir}", "-I$${includedir}/OpenEXR"], "-pthread"),
+	)!
+	pcFile := os.create(filepath.join(pcDir, "OpenEXR.pc"))!
+	pc.writeTo(pcFile)!
+	pcFile.close()!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("OpenEXR")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "OpenEXR.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("OpenEXR")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
