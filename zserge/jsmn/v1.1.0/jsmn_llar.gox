@@ -1,0 +1,62 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#define JSMN_STATIC
+#include <jsmn.h>
+
+int main() {
+    jsmn_parser parser;
+    jsmn_init(&parser);
+    return 0;
+}
+`
+
+id "zserge/jsmn"
+
+fromVer "v1.1.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+	os.writeFile(filepath.join(includeDir, "jsmn.h"), os.readFile(filepath.join(ctx.SourceDir, "jsmn.h"))!, 0o644)!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "jsmn",
+		description = "jsmn is a minimalistic JSON parser in C",
+		version = "v1.1.0",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "jsmn.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("jsmn")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "jsmn.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("jsmn")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
