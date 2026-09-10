@@ -1,0 +1,17 @@
+import "strings"
+
+// Upstream tags mix v.-prefixed releases with one unprefixed release. Normalize
+// the complete tag set to valid, distinct Go semantic versions before sorting.
+func normalize(version string) string {
+	if version.hasPrefix("v.") {
+		return "v" + version.trimPrefix("v.")
+	}
+	if version.hasPrefix("v") {
+		return version
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
