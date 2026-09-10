@@ -1,0 +1,208 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <DataFrame/DataFrame.h>
+
+#include <utility>
+#include <vector>
+
+using namespace hmdf;
+
+int main() {
+    using MyDataFrame = StdDataFrame<unsigned long>;
+
+    MyDataFrame df;
+    std::vector<unsigned long> index = { 1UL, 2UL, 3UL };
+    std::vector<int> values = { 1, 2, 3 };
+    const auto count =
+        df.load_data(std::move(index), std::make_pair("value", values));
+
+    return count != 6 || df.get_column<int>("value")[1] != 2;
+}
+`
+
+id "hosseinmoein/DataFrame"
+
+fromVer "2.0.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+
+	osName := target.require["os"][0]
+	archName := target.require["arch"][0]
+	if (osName != "linux" && osName != "darwin") ||
+		(archName != "amd64" && archName != "arm64") {
+		return false
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	// Conan's 2.0.0 recipe applies these two patches. Their sentinel is absent
+	// from later tags, so this remains version-independent Formula logic.
+	headerPath := filepath.join(
+		ctx.SourceDir,
+		"include",
+		"DataFrame",
+		"Vectors",
+		"HeteroVector.h",
+	)
+	header := string(os.readFile(headerPath)!)
+	if strings.contains(header, "HMDF_API HeteroVector()") {
+		utilsPath := filepath.join(
+			ctx.SourceDir,
+			"include",
+			"DataFrame",
+			"Utils",
+			"Utils.h",
+		)
+		utils := string(os.readFile(utilsPath)!)
+		utils = strings.replace(
+			utils,
+			`template<>
+inline auto
+abs__<float>(const float &val)  { return (std::fabsf(val)); }`,
+			`#ifdef __GNUC__
+template<>
+inline auto
+abs__<float>(const float &val)  { return (std::abs(val)); }
+#else
+template<>
+inline auto
+abs__<float>(const float &val)  { return (std::fabsf(val)); }
+#endif`,
+			1,
+		)
+		utils = strings.replace(
+			utils,
+			`template<>
+inline auto
+abs__<long double>(const long double &val)  { return (std::fabsl(val)); }`,
+			`#ifdef __GNUC__
+template<>
+inline auto
+abs__<long double>(const long double &val)  { return (std::abs(val)); }
+#else
+template<>
+inline auto
+abs__<long double>(const long double &val)  { return (std::fabsl(val)); }
+#endif`,
+			1,
+		)
+		os.writeFile(utilsPath, []byte(utils), 0o644)!
+
+		patchHeaders := []string{
+			"include/DataFrame/Vectors/HeteroConstPtrView.h",
+			"include/DataFrame/Vectors/HeteroConstView.h",
+			"include/DataFrame/Vectors/HeteroPtrView.h",
+			"include/DataFrame/Vectors/HeteroVector.h",
+			"include/DataFrame/Vectors/HeteroView.h",
+		}
+		for relativePath in patchHeaders {
+			headerPath = filepath.join(ctx.SourceDir, relativePath)
+			header = string(os.readFile(headerPath)!)
+			header = strings.replace(
+				header,
+				"#include <DataFrame/DataFrameExports.h>\n",
+				"",
+				1,
+			)
+			header = strings.replaceAll(header, "HMDF_API ", "")
+			os.writeFile(headerPath, []byte(header), 0o644)!
+		}
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.defineBool "HMDF_TESTING", false
+	c.defineBool "HMDF_EXAMPLES", false
+	c.defineBool "HMDF_BENCHMARKS", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(
+		filepath.join(licenseDir, "License"),
+		os.readFile(filepath.join(ctx.SourceDir, "License"))!,
+		0o644,
+	)!
+
+	libs := ["-L$${libdir}", "-lDataFrame"]
+	if osName == "linux" {
+		libs <- "-lpthread"
+		libs <- "-lrt"
+		libs <- "-lm"
+	}
+	cflags := ["-I$${includedir}"]
+	if shared {
+		cflags <- "-DHMDF_SHARED"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "DataFrame",
+		description = "C++ DataFrame for statistical, Financial, and ML analysis -- in modern C++ using native types and contiguous memory storage",
+		version = "2.0.0",
+		URL = "https://github.com/hosseinmoein/DataFrame",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "DataFrame.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("DataFrame")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "DataFrame.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("DataFrame")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++23", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		libDir := filepath.join(installDir, "lib")
+		os.setenv("LD_LIBRARY_PATH", libDir)!
+		os.setenv("DYLD_LIBRARY_PATH", libDir)!
+	}
+	exec! binary
+}
