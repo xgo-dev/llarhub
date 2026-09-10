@@ -1,0 +1,199 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const nonReentrantConsumerSource = `#include "libqhull/qhull_a.h"
+
+int main(void) {
+    coordT points[] = {
+        -1.0, -1.0, -1.0,
+        1.0, -1.0, -1.0,
+        -1.0, 1.0, -1.0,
+        -1.0, -1.0, 1.0,
+    };
+    char flags[] = "qhull Qt";
+    boolT ismalloc = False;
+    int curlong, totlong;
+    int exitcode;
+
+    QHULL_LIB_CHECK
+    exitcode = qh_new_qhull(3, 4, points, ismalloc, flags, stdout, stderr);
+    qh_freeqhull(!qh_ALL);
+    qh_memfreeshort(&curlong, &totlong);
+    return exitcode || curlong || totlong;
+}
+`
+
+const reentrantConsumerSource = `#include "libqhull_r/qhull_ra.h"
+
+int main(void) {
+    coordT points[] = {
+        -1.0, -1.0, -1.0,
+        1.0, -1.0, -1.0,
+        -1.0, 1.0, -1.0,
+        -1.0, -1.0, 1.0,
+    };
+    char flags[] = "qhull Qt";
+    boolT ismalloc = False;
+    qhT qh_qh;
+    qhT *qh = &qh_qh;
+    int curlong, totlong;
+    int exitcode;
+
+    QHULL_LIB_CHECK
+    qh_zero(qh, stderr);
+    exitcode = qh_new_qhull(qh, 3, 4, points, ismalloc, flags, stdout, stderr);
+    qh_freeqhull(qh, !qh_ALL);
+    qh_memfreeshort(qh, &curlong, &totlong);
+    return exitcode || curlong || totlong;
+}
+`
+
+id "qhull/qhull"
+
+fromVer "v7.3.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"reentrant": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "reentrant" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	cmakeListsPath := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeListsPath)!)
+	patches := []string{}
+	if strings.contains(source, "Qhull/QhullConfigVersion.cmake") {
+		patches <- "0001-fix-cmake-conflict-exec-dir.patch"
+		patches <- "0003-fix-cmake-7.3.2.patch"
+	} else {
+		if !strings.contains(source, "option(BUILD_SHARED_LIBS") {
+			patches <- "0003-fix-cmake-8.0.x.patch"
+		}
+	}
+	if strings.contains(source, "std::vector< std::vector< double>>") {
+		patches <- "0004-no-cpp11.patch"
+	}
+	for name in patches {
+		patch := ctx.Proj.readFile(filepath.join("v7.3.2", name))!
+		patchPath := filepath.join(ctx.SourceDir, "_llar_"+name)
+		os.writeFile(patchPath, patch, 0o644)!
+		patch! "-p1", "--batch", "--forward", "-i", patchPath
+	}
+
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "LIB_INSTALL_DIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING.txt"), os.readFile(filepath.join(ctx.SourceDir, "COPYING.txt"))!, 0o644)!
+
+	reentrant := target.options["reentrant"][0] == "ON"
+	pcName := "qhull"
+	libName := "qhull"
+	if !shared {
+		pcName = "qhullstatic"
+		libName = "qhullstatic"
+	}
+	if reentrant {
+		pcName += "_r"
+		libName += "_r"
+	}
+
+	libs := ["-L$${libdir}", "-l"+libName]
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	for path in filepath.glob(filepath.join(pcDir, "*.pc"))! {
+		os.remove(path)!
+	}
+	pcDescription := "Qhull "
+	if reentrant {
+		pcDescription += "reentrant "
+	}
+	if shared {
+		pcDescription += "shared library"
+	} else {
+		pcDescription += "static library"
+	}
+	pc := pkgconfig.new(
+		name = pcName,
+		description = pcDescription,
+		version = "v7.3.2",
+		URL = "http://www.qhull.org",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, pcName+".pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup(pcName)!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	reentrant := target.options["reentrant"][0] == "ON"
+	shared := target.options["shared"][0] == "ON"
+	pcName := "qhull"
+	if !shared {
+		pcName = "qhullstatic"
+	}
+	if reentrant {
+		pcName += "_r"
+	}
+
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+	consumer := filepath.join(testDir, "consumer.c")
+	if reentrant {
+		os.writeFile(consumer, []byte(reentrantConsumerSource), 0o644)!
+	} else {
+		os.writeFile(consumer, []byte(nonReentrantConsumerSource), 0o644)!
+	}
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "qhull.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup(pcName)!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	if shared {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
