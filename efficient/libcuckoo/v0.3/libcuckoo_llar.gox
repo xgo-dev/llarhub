@@ -1,0 +1,89 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <iostream>
+#include <string>
+
+#include <libcuckoo/cuckoohash_map.hh>
+
+int main() {
+  libcuckoo::cuckoohash_map<int, std::string> table;
+
+  for (int i = 0; i < 10; i++) {
+    table.insert(i, "found");
+  }
+
+  std::string out;
+  for (int i = 0; i < 11; i++) {
+    if (table.find(i, out)) {
+      std::cout << i << "  " << out << '\n';
+    } else {
+      std::cout << i << "  NOT FOUND\n";
+    }
+  }
+}
+`
+
+id "efficient/libcuckoo"
+
+fromVer "v0.3"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_EXAMPLES", false
+	c.defineBool "BUILD_STRESS_TESTS", false
+	c.defineBool "BUILD_TESTS", false
+	c.defineBool "BUILD_UNIT_TESTS", false
+	c.defineBool "BUILD_UNIVERSAL_BENCHMARK", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := []string{}
+	if target.require["os"][0] == "linux" {
+		libs <- "-pthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libcuckoo",
+		description = "A high-performance, concurrent hash table",
+		version = "v0.3",
+		URL = "https://github.com/efficient/libcuckoo",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "libcuckoo.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libcuckoo")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libcuckoo.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libcuckoo")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
