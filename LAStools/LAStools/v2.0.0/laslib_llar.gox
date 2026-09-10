@@ -1,0 +1,121 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <iostream>
+#include "LASlib/lasreader.hpp"
+
+int main(void) {
+    LASreadOpener readOpener;
+    readOpener.set_file_name("test_package.cpp");
+
+    std::cout << "Test: " << readOpener.active() << std::endl;
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "LAStools/LAStools"
+
+fromVer "v2.0.0"
+
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" || values.len != 1 {
+			return false
+		}
+		if values[0] != "ON" && values[0] != "OFF" {
+			return false
+		}
+	}
+	osName := target.require["os"][0]
+	archName := target.require["arch"][0]
+	return (osName == "linux" || osName == "darwin") && (archName == "amd64" || archName == "arm64")
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+
+	// Remove the executable subtrees so the existing install rules publish only
+	// LASlib for this fixed upstream root layout.
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	original := source
+	source = strings.replace(source, "\nadd_subdirectory(src)\nif (EXISTS src_full)\n\tadd_subdirectory(src_full)\nendif()\n", "\n", 1)
+	if source == original {
+		panic "unsupported LAStools root CMake layout"
+	}
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	// CMake 4 rejects the older minimums; this is the policy equivalent of
+	// the Conan patch's minimum-version update.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING.txt"), os.readFile(filepath.join(ctx.SourceDir, "COPYING.txt"))!, 0o644)!
+
+	libs := ["-L$${prefix}/lib/LASlib", "-lLASlib"]
+	if !shared {
+		osName := target.require["os"][0]
+		if osName == "darwin" {
+			libs <- "-lc++"
+		} else {
+			libs <- "-lstdc++"
+		}
+		if osName == "linux" {
+			libs <- "-lm"
+		}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "laslib",
+		description = "Efficient tools for lidar processing",
+		version = "v2.0.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "laslib.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("laslib")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "laslib.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("laslib")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		libraryDir := filepath.join(installDir, "lib", "LASlib")
+		os.setenv("LD_LIBRARY_PATH", libraryDir)!
+		os.setenv("DYLD_LIBRARY_PATH", libraryDir)!
+	}
+	exec! binary
+}
