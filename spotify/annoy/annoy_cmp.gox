@@ -1,0 +1,23 @@
+// Upstream tags are v-prefixed semantic versions plus aliases 1.15, 1.16, v1,
+// v1.16, and v.1.16.2. The aliases point to these exact release commits:
+// 1.15 -> v1.15.2, 1.16 -> v1.16.0, v1 and v1.16 -> v1.16.3, and
+// v.1.16.2 -> v1.16.2. Normalize them before semantic comparison.
+func normalize(version string) string {
+	if version == "1.15" {
+		return "v1.15.2"
+	}
+	if version == "1.16" {
+		return "v1.16.0"
+	}
+	if version == "v1" || version == "v1.16" {
+		return "v1.16.3"
+	}
+	if version == "v.1.16.2" {
+		return "v1.16.2"
+	}
+	return version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
