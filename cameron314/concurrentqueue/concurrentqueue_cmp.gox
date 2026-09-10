@@ -1,0 +1,11 @@
+import "strings"
+
+// Upstream uses both v-prefixed and unprefixed tags. Strip the optional prefix
+// so semver.Compare orders every published tag by its release version.
+func normalize(version string) string {
+	return "v" + strings.trimPrefix(version, "v")
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
