@@ -1,0 +1,7 @@
+import "strings"
+
+compareVer (a, b) => {
+	aVersion := "v" + strings.trimPrefix(a.Version, "release-")
+	bVersion := "v" + strings.trimPrefix(b.Version, "release-")
+	return semver.Compare(aVersion, bVersion)
+}
