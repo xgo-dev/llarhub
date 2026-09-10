@@ -40,14 +40,15 @@ onBuild ctx => {
 	shared := target.options["shared"][0] == "ON"
 	fPIC := target.options["fPIC"][0] == "ON"
 
-	// Conan's 2.4.0 patch makes the static target's required consumer macro
-	// part of its public interface. The upstream tag lacks that declaration.
-	ptexCMake := filepath.join(ctx.SourceDir, "src", "ptex", "CMakeLists.txt")
-	contents := string(os.readFile(ptexCMake)!)
-	contents = strings.replace(contents,
-		"set_target_properties(Ptex_static PROPERTIES OUTPUT_NAME Ptex)\n",
-		"set_target_properties(Ptex_static PROPERTIES OUTPUT_NAME Ptex)\n    target_compile_definitions(Ptex_static PUBLIC PTEX_STATIC)\n", 1)
-	os.writeFile(ptexCMake, []byte(contents), 0o644)!
+	if !shared {
+		// Ptex_static's public consumer contract requires PTEX_STATIC.
+		ptexCMake := filepath.join(ctx.SourceDir, "src", "ptex", "CMakeLists.txt")
+		contents := string(os.readFile(ptexCMake)!)
+		contents = strings.replace(contents,
+			"set_target_properties(Ptex_static PROPERTIES OUTPUT_NAME Ptex)\n",
+			"set_target_properties(Ptex_static PROPERTIES OUTPUT_NAME Ptex)\n    target_compile_definitions(Ptex_static PUBLIC PTEX_STATIC)\n", 1)
+		os.writeFile(ptexCMake, []byte(contents), 0o644)!
+	}
 
 	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_llar_build"), installDir)
 	c.buildType "Release"
