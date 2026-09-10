@@ -1,0 +1,161 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <libbase64.h>
+
+#include <stdio.h>
+#include <string.h>
+
+static int fail(const char *msg) {
+    fprintf(stderr, "%s\n", msg);
+    return 1;
+}
+
+int main(void) {
+    const char *plain = "any carnal pleasure";
+    const char *encoded = "YW55IGNhcm5hbCBwbGVhc3VyZQ==";
+    char enc[128];
+    char dec[128];
+    size_t enclen = 0;
+    size_t declen = 0;
+
+    base64_encode(plain, strlen(plain), enc, &enclen, 0);
+    enc[enclen] = '\0';
+    if (enclen != strlen(encoded) || strcmp(enc, encoded) != 0) {
+        return fail("encode mismatch");
+    }
+
+    if (base64_decode(encoded, strlen(encoded), dec, &declen, 0) != 1) {
+        return fail("decode failed");
+    }
+    dec[declen] = '\0';
+    if (declen != strlen(plain) || strcmp(dec, plain) != 0) {
+        return fail("decode mismatch");
+    }
+
+    struct base64_state state;
+    char streamEnc[128];
+    size_t n = 0;
+    size_t total = 0;
+    base64_stream_encode_init(&state, BASE64_FORCE_PLAIN);
+    base64_stream_encode(&state, plain, 3, streamEnc, &n);
+    total += n;
+    base64_stream_encode(&state, plain + 3, strlen(plain) - 3, streamEnc + total, &n);
+    total += n;
+    base64_stream_encode_final(&state, streamEnc + total, &n);
+    total += n;
+    streamEnc[total] = '\0';
+    if (total != strlen(encoded) || strcmp(streamEnc, encoded) != 0) {
+        return fail("stream encode mismatch");
+    }
+
+    char streamDec[128];
+    total = 0;
+    base64_stream_decode_init(&state, BASE64_FORCE_PLAIN);
+    if (base64_stream_decode(&state, encoded, 4, streamDec, &n) != 1) {
+        return fail("stream decode chunk1 failed");
+    }
+    total += n;
+    if (base64_stream_decode(&state, encoded + 4, strlen(encoded) - 4, streamDec + total, &n) != 1) {
+        return fail("stream decode chunk2 failed");
+    }
+    total += n;
+    streamDec[total] = '\0';
+    if (total != strlen(plain) || strcmp(streamDec, plain) != 0) {
+        return fail("stream decode mismatch");
+    }
+
+    return 0;
+}
+`
+
+id "aklomp/base64"
+
+// Native CMake begins at v0.5.0. Earlier tags are Makefile-only; Conan's
+// 0.4.0 CMakeLists is an invented patch and is not carried here.
+fromVer "v0.5.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.defineBool "BASE64_BUILD_CLI", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	cflags := ["-I$${includedir}"]
+	if !shared {
+		cflags <- "-DBASE64_STATIC_DEFINE"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "base64",
+		description = "Fast Base64 stream encoder/decoder",
+		version = "v0.5.0",
+		libs = ["-L$${libdir}", "-lbase64"],
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "base64.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("base64")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "base64.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("base64")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
