@@ -1,0 +1,182 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "marisa.h"
+
+#include <cstdlib>
+
+int main() {
+    int x = 100;
+    int y = 200;
+
+    marisa::swap(x, y);
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "s-yata/marisa-trie"
+
+// v0.2.6 and v0.2.7 use the upstream Autotools build. v0.3.0 and later
+// provide CMake upstream.
+fromVer "v0.2.6"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"tools": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "tools" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	osName := target.require["os"][0]
+
+	// v0.2.6 and v0.2.7 ship Autotools only. Build those tags in-tree after
+	// generating their configure script; v0.3.0 and newer provide CMake.
+	if _, err := os.stat(cmakeLists); os.isNotExist(err) {
+		exec! "autoreconf", "-fi"
+		shared := target.options["shared"][0] == "ON"
+		fPIC := target.options["fPIC"][0] == "ON"
+		tools := target.options["tools"][0] == "ON"
+		// The build matrix may contain '|', which libtool would parse as a
+		// shell pipeline when embedded in an absolute -rpath. Stage the
+		// install at a source-local path and copy its files to LLAR output.
+		stageDir := filepath.join(ctx.SourceDir, "_llar_install")
+		a := autotools.new(ctx.SourceDir, ctx.SourceDir, stageDir)
+		if shared {
+			if fPIC {
+				a.configure "--enable-shared", "--disable-static", "--enable-pic"
+			} else {
+				a.configure "--enable-shared", "--disable-static", "--disable-pic"
+			}
+		} else {
+			if fPIC {
+				a.configure "--disable-shared", "--enable-static", "--enable-pic"
+			} else {
+				a.configure "--disable-shared", "--enable-static", "--disable-pic"
+			}
+		}
+		a.build
+		a.install
+
+		includeDir := filepath.join(installDir, "include")
+		os.mkdirAll(filepath.join(includeDir, "marisa"), 0o755)!
+		for path in filepath.glob(filepath.join(stageDir, "include", "*.h"))! {
+			cp! path, filepath.join(includeDir, filepath.base(path))
+		}
+		for path in filepath.glob(filepath.join(stageDir, "include", "marisa", "*.h"))! {
+			cp! path, filepath.join(includeDir, "marisa", filepath.base(path))
+		}
+		libDir := filepath.join(installDir, "lib")
+		os.mkdirAll(libDir, 0o755)!
+		for path in filepath.glob(filepath.join(stageDir, "lib", "libmarisa*"))! {
+			cp! path, filepath.join(libDir, filepath.base(path))
+		}
+		os.removeAll(filepath.join(libDir, "libmarisa.la"))!
+		if shared && osName == "darwin" {
+			// Keep the unversioned name as an alias of the real SONAME file. The
+			// alias must not acquire a second install ID when staging is copied.
+			dylib := filepath.join(libDir, "libmarisa.0.dylib")
+			alias := filepath.join(libDir, "libmarisa.dylib")
+			os.removeAll(alias)!
+			exec! "ln", "-s", "libmarisa.0.dylib", alias
+			exec! "install_name_tool", "-id", "@rpath/libmarisa.0.dylib", dylib
+		}
+		if tools {
+			binDir := filepath.join(installDir, "bin")
+			os.mkdirAll(binDir, 0o755)!
+			for path in filepath.glob(filepath.join(stageDir, "bin", "*"))! {
+				cp! path, filepath.join(binDir, filepath.base(path))
+			}
+			if shared && osName == "darwin" {
+				oldDylib := filepath.join(stageDir, "lib", "libmarisa.0.dylib")
+				newDylib := "@loader_path/../lib/libmarisa.0.dylib"
+				for path in filepath.glob(filepath.join(binDir, "*"))! {
+					exec! "install_name_tool", "-change", oldDylib, newDylib, path
+				}
+			}
+		}
+		os.removeAll(stageDir)!
+	} else if err != nil {
+		panic err
+	} else {
+		shared := target.options["shared"][0] == "ON"
+		fPIC := target.options["fPIC"][0] == "ON"
+		tools := target.options["tools"][0] == "ON"
+
+		c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+		c.define "CMAKE_INSTALL_LIBDIR", "lib"
+		c.define "LIB_INSTALL_DIR", "lib"
+		c.defineBool "BUILD_SHARED_LIBS", shared
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+		c.defineBool "BUILD_TOOLS", tools
+		c.defineBool "ENABLE_TOOLS", tools
+		c.configure
+		c.build
+		c.install
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING.md"), os.readFile(filepath.join(ctx.SourceDir, "COPYING.md"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lmarisa"]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "Marisa",
+		description = "Matching Algorithm with Recursively Implemented StorAge",
+		version = "v0.2.6",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "marisa.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("marisa")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "marisa.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("marisa")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
