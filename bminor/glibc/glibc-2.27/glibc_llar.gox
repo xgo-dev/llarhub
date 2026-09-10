@@ -1,0 +1,80 @@
+import (
+    "os"
+    "path/filepath"
+)
+
+id "bminor/glibc"
+
+fromVer "glibc-2.27"
+
+filter => {
+    return target.require["os"][0] == "linux" &&
+        (target.require["arch"][0] == "amd64" || target.require["arch"][0] == "arm64")
+}
+
+onRequire (proj, deps) => {
+    deps.require "torvalds/linux", "v7.2"
+}
+
+onBuild ctx => {
+    headers := ctx.outputDir(ctx.Proj.Deps[0])
+    // Keep configure's UAPI input separate from any previous libc installation.
+    cp! "-a", headers+"/usr/.", ctx.outputDir+"/usr/"
+    a := autotools.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), "/usr")
+    // GCC 10+ defaults to -fno-common; glibc 2.27's nsswitch.h contains
+    // tentative definitions such as __nss_passwd_database in multiple objects.
+    a.configure "--with-headers="+filepath.join(headers, "usr", "include"),
+        "--libdir=/usr/lib", "--enable-shared", "--disable-profile", "--disable-werror",
+        "CFLAGS=-O2 -fcommon", "CXXFLAGS=-O2", "CPPFLAGS="
+    a.build
+    a.install "install_root="+ctx.outputDir
+    ctx.setMetadata "--sysroot="+ctx.outputDir
+}
+
+onTest ctx => {
+    source := filepath.join(ctx.SourceDir, "consumer.c")
+    binary := filepath.join(ctx.SourceDir, "consumer")
+    os.writeFile! source, []byte(`#include <errno.h>
+#include <asm/unistd.h>
+#include <gnu/libc-version.h>
+#include <linux/futex.h>
+#include <linux/netlink.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void *worker(void *arg) {
+    return arg;
+}
+
+int main(void) {
+    pthread_t thread;
+    void *result = NULL;
+    char *text = strdup("glibc consumer");
+    if (sizeof(struct nlmsghdr) != 16 || FUTEX_WAIT != 0 || __NR_futex <= 0)
+        return 5;
+    if (text == NULL || strcmp(text, "glibc consumer") != 0)
+        return 1;
+    if (pthread_create(&thread, NULL, worker, text) != 0)
+        return 2;
+    if (pthread_join(thread, &result) != 0 || result != text)
+        return 3;
+    errno = EINVAL;
+    if (strerror(errno) == NULL)
+        return 4;
+    printf("glibc %s\n", gnu_get_libc_version());
+    free(text);
+    return 0;
+}
+`), 0o644
+    // Native GCC also searches its host multiarch directories. Prefer this
+    // installation's startup objects and linker scripts for the consumer.
+    cc! "--sysroot="+ctx.outputDir, "-B"+ctx.outputDir+"/usr/lib/",
+        "-L"+ctx.outputDir+"/usr/lib", source, "-pthread", "-o", binary
+    loader := filepath.join(ctx.outputDir, "lib64", "ld-linux-x86-64.so.2")
+    if target.require["arch"][0] == "arm64" {
+        loader = filepath.join(ctx.outputDir, "lib", "ld-linux-aarch64.so.1")
+    }
+    exec! loader, "--library-path", ctx.outputDir+"/lib:"+ctx.outputDir+"/lib64:"+ctx.outputDir+"/usr/lib", binary
+}
