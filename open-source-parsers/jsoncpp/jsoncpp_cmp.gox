@@ -1,0 +1,24 @@
+import "strings"
+
+// The complete tag set includes svn-release-0.5.0/0.6.0-rcN, 00.11.0, and
+// 0.10.2-p1 alongside ordinary numeric releases. GNU ordering selects the
+// svn-release tags after 1.9.8, so map every spelling into a valid, distinct
+// semantic-version position before comparing the complete set.
+func normalize(version string) string {
+	switch version {
+	case "svn-import":
+		return "v0.0.0-0"
+	case "00.11.0":
+		return "v0.11.0"
+	case "0.10.2-p1":
+		return "v0.10.3-0"
+	}
+	if strings.hasPrefix(version, "svn-release-") {
+		version = strings.trimPrefix(version, "svn-release-")
+	}
+	return "v" + strings.trimPrefix(version, "v")
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
