@@ -1,0 +1,138 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <vectorclass.h>
+
+#include <iostream>
+#include <stdexcept>
+#include <string>
+
+void print_instruction_set() {
+    const auto instruction_set = instrset_detect();
+    switch (instruction_set) {
+        case 10:
+            std::cout << "AVX512VL, AVX512BW, AVX512DQ\n";
+        case 9:
+            std::cout << "AVX512F\n";
+        case 8:
+            std::cout << "AVX2\n";
+        case 7:
+            std::cout << "AVX supported by CPU and operating system\n";
+        case 6:
+            std::cout << "SSE4.2\n";
+        case 5:
+            std::cout << "SSE4.1\n";
+        case 4:
+            std::cout << "Supplementary SSE3 (SSSE3)\n";
+        case 3:
+            std::cout << "SSE3\n";
+        case 2:
+            std::cout << "SSE2\n";
+        case 1:
+            std::cout << "SSE (XMM) supported by CPU (not testing for OS support)\n";
+        case 0:
+            std::cout << "80386 instruction set\n";
+            break;
+        default:
+            throw std::runtime_error("Unexpected instruction set " + std::to_string(instruction_set));
+    }
+}
+
+int main() {
+    print_instruction_set();
+
+    Vec4i a(10, 11, 12, 13);
+    Vec4i b(20, 21, 22, 23);
+
+    Vec4i c = a + b;
+    for (int i = 0; i < c.size(); ++i) {
+        std::cout << " " << c[i];
+    }
+    std::cout << std::endl;
+
+    return 0;
+}
+`
+
+id "vectorclass/version2"
+
+fromVer "v2.01.03"
+
+defaults {
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+
+	osName := target.require["os"][0]
+	arch := target.require["arch"][0]
+	return (osName == "linux" || osName == "darwin" || osName == "windows") &&
+		(arch == "386" || arch == "amd64")
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	osName := target.require["os"][0]
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	cmakeLists := ctx.Proj.readFile("CMakeLists.txt")!
+	os.writeFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "VECTORCLASS_SRC_DIR", ctx.SourceDir
+	if osName != "windows" {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "vectorclass",
+		description = "C++ class library for SIMD vector operations",
+		version = "v2.01.03",
+		libs = ["-L$${libdir}", "-lvectorclass"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "vectorclass.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("vectorclass")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "vectorclass.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("vectorclass")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
