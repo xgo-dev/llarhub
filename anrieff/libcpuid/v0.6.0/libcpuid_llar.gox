@@ -1,0 +1,110 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include "libcpuid/libcpuid.h"
+
+#include <stdio.h>
+
+int main(void)
+{
+	if (!cpuid_present()) {
+		return 1;
+	}
+
+	struct cpu_raw_data_t raw;
+	struct cpu_id_t data;
+	if (cpuid_get_raw_data(&raw) < 0) {
+		return 2;
+	}
+	if (cpu_identify(&raw, &data) < 0) {
+		return 3;
+	}
+
+	printf("%s %s\n", data.vendor_str, data.cpu_codename);
+	return 0;
+}
+`
+
+id "anrieff/libcpuid"
+
+fromVer "v0.6.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return slices.contains(target.require["arch"], "amd64")
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS", shared
+	c.defineBool "ENABLE_DOCS", false
+	c.defineBool "LIBCPUID_TESTS", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libcpuid",
+		description = "libcpuid provides CPU identification for x86",
+		version = "v0.6.0",
+		libs = ["-L$${libdir}", "-lcpuid"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "libcpuid.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libcpuid")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	binary := filepath.join(testDir, "consumer")
+	flagsFile := filepath.join(testDir, "libcpuid.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libcpuid")!), 0o644)!
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+	exec! filepath.join(installDir, "bin", "cpuid_tool"), "--report"
+}

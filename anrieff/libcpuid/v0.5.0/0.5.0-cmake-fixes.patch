@@ -1,0 +1,14 @@
+--- a/cpuid_tool/CMakeLists.txt
++++ b/cpuid_tool/CMakeLists.txt
+@@ -5 +5 @@
+-if(WIN32)
++if(0)
+--- a/libcpuid/CMakeLists.txt
++++ b/libcpuid/CMakeLists.txt
+@@ -15,5 +15,5 @@
+ if(UNIX)
+-  add_library(cpuid SHARED ${cpuid_sources})
++  add_library(cpuid ${cpuid_sources})
+ else()
+   add_library(cpuid ${cpuid_sources})
+ endif()
