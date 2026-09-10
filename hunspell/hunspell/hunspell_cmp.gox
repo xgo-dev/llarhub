@@ -1,0 +1,14 @@
+import "strings"
+
+// The complete tag set contains the historical hunspell-1.4.0 alias and
+// v1.3.4 through v1.7.3. Normalize the alias before semver ordering.
+func normalize(version string) string {
+	if version == "hunspell-1.4.0" {
+		return "v1.4.0"
+	}
+	return "v" + strings.trimPrefix(version, "v")
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
