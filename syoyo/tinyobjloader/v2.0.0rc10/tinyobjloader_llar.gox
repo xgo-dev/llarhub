@@ -1,0 +1,139 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <tiny_obj_loader.h>
+
+int main() {
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromString(
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", "")) {
+        return 1;
+    }
+    if (!reader.Valid() || reader.GetShapes().size() != 1) {
+        return 2;
+    }
+    return reader.GetAttrib().vertices.size() == 9 ? 0 : 3;
+}
+`
+
+const headerOnlyConsumerSource = `
+#define TINYOBJLOADER_IMPLEMENTATION
+#include <tiny_obj_loader.h>
+
+int main() {
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromString(
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", "")) {
+        return 1;
+    }
+    return reader.Valid() ? 0 : 2;
+}
+`
+
+id "syoyo/tinyobjloader"
+
+fromVer "v2.0.0rc10"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"double": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "double" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	double := target.options["double"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_INSTALL_DOCDIR", "licenses"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "TINYOBJLOADER_USE_DOUBLE", double
+	c.defineBool "TINYOBJLOADER_BUILD_TEST_LOADER", false
+	c.defineBool "TINYOBJLOADER_BUILD_OBJ_STICHER", false
+	c.configure
+	c.build
+	c.install
+
+	libraryName := "tinyobjloader"
+	if double {
+		libraryName += "_double"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	cflags := ["-I$${includedir}"]
+	if double {
+		cflags <- "-DTINYOBJLOADER_USE_DOUBLE"
+	}
+	pc := pkgconfig.new(
+		name = "tinyobjloader",
+		description = "Tiny but powerful single file wavefront obj loader",
+		version = "v2.0.0rc10",
+		libs = ["-L$${libdir}", "-l" + libraryName],
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, libraryName + ".pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup(libraryName)!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	libraryName := "tinyobjloader"
+	if target.options["double"][0] == "ON" {
+		libraryName += "_double"
+	}
+	pkgconfig.use installDir
+	headerOnlyConsumer := filepath.join(testDir, "header_only.cpp")
+	os.writeFile(headerOnlyConsumer, []byte(headerOnlyConsumerSource), 0o644)!
+	headerOnlyFlags := filepath.join(testDir, "header_only.cflags")
+	os.writeFile(headerOnlyFlags, []byte(pkgconfig.CFlags(libraryName)!), 0o644)!
+	headerOnlyBinary := filepath.join(testDir, "header_only")
+	exec! "c++", "-std=c++11", headerOnlyConsumer, "-o", headerOnlyBinary, "@"+headerOnlyFlags
+	exec! headerOnlyBinary
+	flagsFile := filepath.join(testDir, libraryName+".flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup(libraryName)!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		osName := target.require["os"][0]
+		if osName == "linux" {
+			os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		} else if osName == "darwin" {
+			os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		}
+	}
+	exec! binary
+}
