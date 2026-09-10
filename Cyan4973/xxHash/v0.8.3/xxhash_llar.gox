@@ -1,0 +1,107 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include "xxhash.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+
+
+int main()
+{
+    size_t const bufferSize = 10;
+    void* const buffer = malloc(bufferSize);
+    XXH64_hash_t hash = XXH64(buffer, bufferSize, 0);
+    printf("%llu", hash);
+    free(buffer);
+    return 0;
+}
+`
+
+id "Cyan4973/xxHash"
+
+fromVer "v0.8.3"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"utility": "ON",
+}
+
+filter => {
+	if !slices.contains(target.require["os"], "linux") && !slices.contains(target.require["os"], "darwin") {
+		return false
+	}
+	if !slices.contains(target.require["arch"], "amd64") && !slices.contains(target.require["arch"], "arm64") {
+		return false
+	}
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "utility" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	utility := target.options["utility"][0] == "ON"
+
+	c := cmake.new(
+		filepath.join(ctx.SourceDir, "cmake_unofficial"),
+		filepath.join(ctx.SourceDir, "_build"),
+		installDir,
+	)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "XXHASH_BUILD_XXHSUM", utility
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcPath := filepath.join(installDir, "lib", "pkgconfig", "libxxhash.pc")
+	pc := string(os.readFile(pcPath)!)
+	pc = strings.replace(pc, "prefix="+installDir, "prefix=$${pcfiledir}/../..", 1)
+	os.writeFile(pcPath, []byte(pc), 0o644)!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libxxhash")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libxxhash.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libxxhash")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "@"+flagsFile, "-o", binary
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
