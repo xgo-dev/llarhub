@@ -1,0 +1,210 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <cjson/cJSON.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    cJSON *monitor = cJSON_CreateObject();
+    cJSON *resolutions = cJSON_AddArrayToObject(monitor, "resolutions");
+    char *text;
+
+    if (monitor == NULL || resolutions == NULL ||
+        cJSON_AddNumberToObject(resolutions, "width", 3840) == NULL ||
+        cJSON_AddNumberToObject(resolutions, "height", 2160) == NULL) {
+        cJSON_Delete(monitor);
+        return 1;
+    }
+
+    text = cJSON_Print(monitor);
+    cJSON_Delete(monitor);
+    if (text == NULL) {
+        return 1;
+    }
+    printf("%s\n", text);
+    free(text);
+    return 0;
+}
+`
+
+const utilsConsumerSource = `#include <cjson/cJSON_Utils.h>
+
+int main(void) {
+    cJSON *object = cJSON_CreateObject();
+    if (object == NULL) {
+        return 1;
+    }
+    cJSONUtils_SortObject(object);
+    cJSON_Delete(object);
+    return 0;
+}
+`
+
+id "DaveGamble/cJSON"
+
+fromVer "v1.7.12"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"utils": "OFF",
+	"use_locales": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "utils" && name != "use_locales" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	utils := target.options["utils"][0] == "ON"
+	useLocales := target.options["use_locales"][0] == "ON"
+
+	// cJSON v1.7.12 carries the exact install-target form from the Conan
+	// patch; later tags already contain this form.
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(
+		source,
+		`install(TARGETS "${CJSON_LIB}" DESTINATION "${CMAKE_INSTALL_FULL_LIBDIR}" EXPORT "${CJSON_LIB}")`,
+		`install(TARGETS "${CJSON_LIB}"
+	EXPORT "${CJSON_LIB}"
+	ARCHIVE DESTINATION "${CMAKE_INSTALL_FULL_LIBDIR}"
+	LIBRARY DESTINATION "${CMAKE_INSTALL_FULL_LIBDIR}"
+	RUNTIME DESTINATION "${CMAKE_INSTALL_FULL_BINDIR}"
+	INCLUDES DESTINATION "${CMAKE_INSTALL_FULL_INCLUDEDIR}"
+)`,
+		1,
+	)
+	source = strings.replace(
+		source,
+		`install(TARGETS "${CJSON_UTILS_LIB}" DESTINATION "${CMAKE_INSTALL_FULL_LIBDIR}" EXPORT "${CJSON_UTILS_LIB}")`,
+		`install(TARGETS "${CJSON_UTILS_LIB}"
+	EXPORT "${CJSON_UTILS_LIB}"
+	ARCHIVE DESTINATION "${CMAKE_INSTALL_FULL_LIBDIR}"
+	LIBRARY DESTINATION "${CMAKE_INSTALL_FULL_LIBDIR}"
+	RUNTIME DESTINATION "${CMAKE_INSTALL_FULL_BINDIR}"
+	INCLUDES DESTINATION "${CMAKE_INSTALL_FULL_INCLUDEDIR}"
+)`,
+		1,
+	)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_DEFAULT_CMP0042", "NEW"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "ENABLE_SANITIZERS", false
+	c.defineBool "ENABLE_SAFE_STACK", false
+	c.defineBool "ENABLE_PUBLIC_SYMBOLS", true
+	c.defineBool "ENABLE_HIDDEN_SYMBOLS", false
+	c.defineBool "ENABLE_TARGET_EXPORT", false
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "BUILD_SHARED_AND_STATIC_LIBS", false
+	c.defineBool "CJSON_OVERRIDE_BUILD_SHARED_LIBS", false
+	c.defineBool "ENABLE_CJSON_UTILS", utils
+	c.defineBool "ENABLE_CJSON_TEST", false
+	c.defineBool "ENABLE_LOCALES", useLocales
+	c.defineBool "ENABLE_FUZZING", false
+	c.defineBool "ENABLE_CUSTOM_COMPILER_FLAGS", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lcjson"]
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs <- "-lm"
+	}
+	cflags := ["-I$${includedir}", "-I$${includedir}/cjson"]
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libcjson",
+		description = "Ultralightweight JSON parser in ANSI C",
+		version = "v1.7.12",
+		uRL = "https://github.com/DaveGamble/cJSON",
+		libs = libs,
+		cflags = cflags,
+	)!
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		pc.libs.private ["-lm"]
+	}
+	out := os.create(filepath.join(pcDir, "libcjson.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	if utils {
+		utilsPC := pkgconfig.new(
+			name = "libcjson_utils",
+			description = "An implementation of JSON Pointer, Patch and Merge Patch based on cJSON.",
+			version = "v1.7.12",
+			uRL = "https://github.com/DaveGamble/cJSON",
+			requires = ["libcjson"],
+			libs = ["-L$${libdir}", "-lcjson_utils"],
+			cflags = cflags,
+		)!
+		utilsOut := os.create(filepath.join(pcDir, "libcjson_utils.pc"))!
+		utilsPC.writeTo(utilsOut)!
+		utilsOut.close()!
+	}
+
+	pkgconfig.use installDir
+	if utils {
+		ctx.setMetadata pkgconfig.lookup("libcjson_utils")!
+	} else {
+		ctx.setMetadata pkgconfig.lookup("libcjson")!
+	}
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	utils := target.options["utils"][0] == "ON"
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	source := consumerSource
+	pcName := "libcjson"
+	if utils {
+		source = utilsConsumerSource
+		pcName = "libcjson_utils"
+	}
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(source), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "cjson.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup(pcName)!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
