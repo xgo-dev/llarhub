@@ -1,0 +1,79 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <algorithm>
+#include <array>
+#include <cpp-sort/sorters/quick_sorter.h>
+#include <cpp-sort/sorters/smooth_sorter.h>
+#include <cpp-sort/sorters/std_sorter.h>
+
+int main() {
+    std::array<int, 5> smooth = {5, 8, 3, 2, 9};
+    cppsort::smooth_sort(smooth);
+    if (!std::is_sorted(smooth.begin(), smooth.end())) {
+        return 1;
+    }
+
+    std::array<int, 5> quick = {9, 2, 8, 3, 5};
+    cppsort::quick_sorter{}(quick);
+    if (!std::is_sorted(quick.begin(), quick.end())) {
+        return 1;
+    }
+
+    std::array<int, 5> standard = {3, 1, 4, 1, 5};
+    cppsort::std_sorter{}(standard);
+    if (!std::is_sorted(standard.begin(), standard.end())) {
+        return 1;
+    }
+
+    return 0;
+}
+`
+
+id "Morwenn/cpp-sort"
+
+// Every visible tag from 1.10.0 through v2.2.0 keeps the same CMake install
+// target and these public sorter headers; the target propagates C++14 for 1.x
+// and C++17 for 2.x to the consumer.
+fromVer "1.10.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	// Match Conan's default: install the header-only CMake target with tests off.
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_TESTING", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	for name in ["LICENSE.txt", "NOTICE.txt"] {
+		os.writeFile(filepath.join(licenseDir, name), os.readFile(filepath.join(ctx.SourceDir, name))!, 0o644)!
+	}
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	os.writeFile(filepath.join(testDir, "consumer.cpp"), []byte(consumerSource), 0o644)!
+	os.writeFile(filepath.join(testDir, "CMakeLists.txt"), []byte(`cmake_minimum_required(VERSION 3.8.0)
+project(cpp_sort_consumer LANGUAGES CXX)
+
+find_package(cpp-sort REQUIRED CONFIG)
+
+add_executable(cpp_sort_consumer consumer.cpp)
+target_link_libraries(cpp_sort_consumer PRIVATE cpp-sort::cpp-sort)
+`), 0o644)!
+
+	c := cmake.new(testDir, filepath.join(testDir, "_build"), "")
+	c.configure "-Dcpp-sort_DIR="+filepath.join(installDir, "lib", "cmake", "cpp-sort")
+	c.build
+	exec! filepath.join(testDir, "_build", "cpp_sort_consumer")
+}
