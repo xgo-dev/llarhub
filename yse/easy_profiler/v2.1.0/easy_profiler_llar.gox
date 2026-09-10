@@ -1,0 +1,139 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <iostream>
+#include <easy/arbitrary_value.h>
+#include <easy/profiler.h>
+#include <easy/reader.h>
+
+void renderThread() {
+    EASY_THREAD("Render");
+    volatile int i = 0;
+    for (; i < 1000; ++i) {}
+}
+
+int main() {
+    EASY_PROFILER_ENABLE;
+    EASY_MAIN_THREAD;
+    profiler::startListen();
+    renderThread();
+    std::cout << "SUCCESS" << std::endl;
+    return 0;
+}
+`
+
+id "yse/easy_profiler"
+
+fromVer "v2.1.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+
+	osName := target.require["os"][0]
+	return osName == "linux" || osName == "darwin" || osName == "freebsd" || osName == "windows"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	osName := target.require["os"][0]
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "EASY_PROFILER_NO_GUI", true
+	c.defineBool "EASY_PROFILER_NO_SAMPLES", true
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	for name in ["LICENSE", "LICENSE.MIT", "LICENSE.APACHE"] {
+		os.writeFile(filepath.join(licenseDir, name), os.readFile(filepath.join(ctx.SourceDir, name))!, 0o644)!
+	}
+
+	libs := ["-L$${libdir}", "-leasy_profiler"]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lm"
+		libs <- "-lpthread"
+	} else if osName == "windows" {
+		libs <- "-lpsapi"
+		libs <- "-lws2_32"
+	}
+
+	cflags := [
+		"-I$${includedir}",
+		"-DBUILD_WITH_EASY_PROFILER=1",
+		"-DEASY_PROFILER_VERSION_MAJOR=2",
+		"-DEASY_PROFILER_VERSION_MINOR=1",
+		"-DEASY_PROFILER_VERSION_PATCH=0",
+		"-DEASY_DEFAULT_PORT=28077",
+	]
+	if !shared {
+		cflags <- "-DEASY_PROFILER_STATIC=1"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "easy_profiler",
+		description = "Lightweight profiler library for c++",
+		version = "v2.1.0",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "easy_profiler.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("easy_profiler")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	osName := target.require["os"][0]
+	shared := target.options["shared"][0] == "ON"
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "easy_profiler.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("easy_profiler")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if shared {
+		if osName == "windows" {
+			currentPath := os.getenv("PATH")
+			os.setenv("PATH", filepath.join(installDir, "bin")+";"+currentPath)!
+		} else {
+			os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+			os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		}
+	}
+	exec! binary
+}
