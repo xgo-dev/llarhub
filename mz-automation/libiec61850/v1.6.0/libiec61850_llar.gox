@@ -1,0 +1,145 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <iostream>
+
+#include "libiec61850/iec61850_common.h"
+
+int main() {
+    std::cout << "libiec61850 v" << LibIEC61850_getVersionString() << std::endl;
+    return 0;
+}
+`
+
+id "mz-automation/libiec61850"
+
+// The pinned Conan Center config serves only 1.6.0; earlier upstream tags are
+// outside the recipe contract translated by this module.
+fromVer "v1.6.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	if !slices.contains(target.require["os"], "linux") && !slices.contains(target.require["os"], "darwin") {
+		return false
+	}
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	// The upstream install rules group static and shared pairs together, while
+	// LLAR publishes exactly the pair selected by the shared option.
+	halLists := filepath.join(ctx.SourceDir, "hal", "CMakeLists.txt")
+	halSource := string(os.readFile(halLists)!)
+	if shared {
+		halSource = strings.replace(halSource, "install (TARGETS hal hal-shared", "install (TARGETS hal-shared", 1)
+	} else {
+		halSource = strings.replace(halSource, "install (TARGETS hal hal-shared", "install (TARGETS hal", 1)
+	}
+	os.writeFile(halLists, []byte(halSource), 0o644)!
+
+	srcLists := filepath.join(ctx.SourceDir, "src", "CMakeLists.txt")
+	srcSource := string(os.readFile(srcLists)!)
+	if shared {
+		srcSource = strings.replace(srcSource, "install (TARGETS iec61850 iec61850-shared", "install (TARGETS iec61850-shared", 1)
+	} else {
+		srcSource = strings.replace(srcSource, "install (TARGETS iec61850 iec61850-shared", "install (TARGETS iec61850", 1)
+	}
+	os.writeFile(srcLists, []byte(srcSource), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_EXAMPLES", false
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	buildTarget := "iec61850"
+	if shared {
+		buildTarget = "iec61850-shared"
+	}
+	c.build "--target", buildTarget
+	c.install
+
+	// The upstream .pc is absolute and is installed under share/pkgconfig.
+	// Conan removes that tree; publish one relocatable file in LLAR's lookup
+	// location instead.
+	os.removeAll(filepath.join(installDir, "share"))!
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-liec61850"]
+	if shared {
+		libs <- "-lhal-shared"
+	} else {
+		libs <- "-lhal"
+	}
+	if slices.contains(target.require["os"], "linux") {
+		libs <- "-lpthread"
+		libs <- "-lm"
+		libs <- "-lrt"
+	} else {
+		libs <- "-lpthread"
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libiec61850",
+		description = "IEC 61850 MMS/GOOSE client and server library",
+		version = "1.6.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "libiec61850.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libiec61850")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libiec61850.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libiec61850")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
