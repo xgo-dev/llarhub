@@ -1,0 +1,7 @@
+id "joseluisq/macosx-sdks"
+
+fromVer "14.5"
+
+// Obtain and use the SDK only as permitted by Apple's license terms.
+onBuild ctx => {
+}
