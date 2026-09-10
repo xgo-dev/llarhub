@@ -1,0 +1,161 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <nlopt.h>
+
+static double objective(unsigned n, const double *x, double *grad, void *data)
+{
+    return x[0] * x[0];
+}
+
+int main(void)
+{
+    nlopt_opt opt = nlopt_create(NLOPT_LN_COBYLA, 1);
+    if (!opt)
+        return 1;
+	if (nlopt_set_min_objective(opt, objective, NULL) < 0)
+		return 1;
+	if (nlopt_set_xtol_rel(opt, 1e-6) < 0)
+		return 1;
+
+	double x = 1.0;
+    double minf;
+	if (nlopt_optimize(opt, &x, &minf) < 0)
+		return 1;
+	nlopt_destroy(opt);
+	return 0;
+}
+`
+
+id "stevengj/nlopt"
+
+fromVer "v2.6.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"enable_cxx_routines": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "enable_cxx_routines" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	enableCxxRoutines := target.options["enable_cxx_routines"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	if !shared && !fPIC {
+		// The v2.6.1 CMakeLists probes HAS_FPIC before adding a global -fPIC
+		// flag. Pre-seed that probe so fPIC=OFF remains caller-controlled.
+		c.defineBool "HAS_FPIC", false
+	}
+	c.defineBool "NLOPT_CXX", enableCxxRoutines
+	c.defineBool "NLOPT_FORTRAN", false
+	c.defineBool "NLOPT_PYTHON", false
+	c.defineBool "NLOPT_OCTAVE", false
+	c.defineBool "NLOPT_MATLAB", false
+	c.defineBool "NLOPT_GUILE", false
+	c.defineBool "NLOPT_SWIG", false
+	c.defineBool "NLOPT_TESTS", false
+	c.defineBool "WITH_THREADLOCAL", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	for subdir, name in {
+		"ags": "COPYRIGHT",
+		"bobyqa": "COPYRIGHT",
+		"cobyla": "COPYRIGHT",
+		"direct": "COPYING",
+		"esch": "COPYRIGHT",
+		"luksan": "COPYRIGHT",
+		"newuoa": "COPYRIGHT",
+		"slsqp": "COPYRIGHT",
+		"stogo": "COPYRIGHT",
+	} {
+		subdirDir := filepath.join(licenseDir, subdir)
+		os.mkdirAll(subdirDir, 0o755)!
+		sourcePath := filepath.join(ctx.SourceDir, "src", "algs", subdir, name)
+		os.writeFile(filepath.join(subdirDir, name), os.readFile(sourcePath)!, 0o644)!
+	}
+
+	osName := target.require["os"][0]
+	libs := ["-L$${libdir}", "-lnlopt"]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lm"
+	}
+	if !shared && enableCxxRoutines {
+		if osName == "darwin" {
+			libs <- "-lc++"
+		} else if osName != "windows" {
+			libs <- "-lstdc++"
+		}
+	}
+
+	cflags := ["-I$${includedir}"]
+	if osName == "windows" && shared {
+		cflags <- "-DNLOPT_DLL"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "NLopt",
+		description = "nonlinear optimization library",
+		version = "2.6.1",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "nlopt.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("nlopt")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "nlopt.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("nlopt")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
