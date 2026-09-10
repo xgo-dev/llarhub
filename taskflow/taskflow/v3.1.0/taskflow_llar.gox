@@ -1,0 +1,99 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <taskflow/taskflow.hpp>
+
+int main()
+{
+    tf::Executor executor;
+    tf::Taskflow taskflow;
+
+    auto A = taskflow.emplace([](){ std::cout << "Task A\n"; });
+    auto B = taskflow.emplace([](){ std::cout << "Task B\n"; });
+    auto C = taskflow.emplace([](){ std::cout << "Task C\n"; });
+    auto D = taskflow.emplace([](){ std::cout << "Task D\n"; });
+
+    A.precede(B);
+    A.precede(C);
+    B.precede(D);
+    C.precede(D);
+
+    executor.run(taskflow).get();
+    return 0;
+}
+`
+
+func copyTree(src, dst string) {
+	os.mkdirAll(dst, 0o755)!
+	for entry in os.readDir(src)! {
+		from := filepath.join(src, entry.name)
+		to := filepath.join(dst, entry.name)
+		if entry.isDir {
+			copyTree from, to
+			continue
+		}
+		os.writeFile(to, os.readFile(from)!, 0o644)!
+	}
+}
+
+id "taskflow/taskflow"
+
+fromVer "v3.1.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	copyTree filepath.join(ctx.SourceDir, "taskflow"), filepath.join(includeDir, "taskflow")
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := []string{}
+	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
+		libs <- "-lpthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "taskflow",
+		description = "A fast C++ header-only library to help you quickly write parallel programs with complex task dependencies.",
+		version = "v3.1.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "taskflow.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("taskflow")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "taskflow.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("taskflow")!), 0o644)!
+
+	cppStandard := "c++17"
+	cmakeSource := string(os.readFile(filepath.join(ctx.SourceDir, "CMakeLists.txt"))!)
+	if strings.contains(cmakeSource, "set(CMAKE_CXX_STANDARD 20)") {
+		cppStandard = "c++20"
+	}
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std="+cppStandard, consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
