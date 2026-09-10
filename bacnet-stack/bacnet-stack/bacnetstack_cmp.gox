@@ -1,0 +1,16 @@
+import "strings"
+
+// Upstream uses hyphens in its early release tags, dots in later release
+// tags, and has a non-release `start` tag. Normalize those exact forms before
+// comparing the complete tag set as semantic versions.
+func normalize(version string) string {
+	if version == "start" {
+		return "v0.0.0"
+	}
+	version = strings.trimPrefix(version, "bacnet-stack-")
+	return "v" + strings.replace(version, "-", ".", -1)
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
