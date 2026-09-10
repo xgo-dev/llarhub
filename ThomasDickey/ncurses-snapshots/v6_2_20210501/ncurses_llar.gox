@@ -1,0 +1,101 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+id "ThomasDickey/ncurses-snapshots"
+
+fromVer "v6_2_20210501"
+
+filter => {
+	return slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "darwin")
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	terminfo := filepath.join(installDir, "share", "terminfo")
+	a := autotools.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	a.configure "--with-normal", "--without-shared", "--without-debug",
+		"--without-tests", "--without-cxx-binding", "--without-ada", "--without-manpages",
+		"--enable-widec", "--with-termlib", "--with-ticlib", "--disable-pc-files",
+		"--libdir="+filepath.join(installDir, "lib"),
+		"--with-default-terminfo-dir="+terminfo, "--with-terminfo-dirs="+terminfo
+	a.build "-j4"
+	a.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	// Keep the canonical database under share/terminfo. The lib/terminfo
+	// directory alias and file symlinks cannot be packed by LLAR's archiver.
+	os.remove(filepath.join(installDir, "lib", "terminfo"))!
+	filepath.walkDir(installDir, (path, entry, err) => {
+		if err != nil {
+			return err
+		}
+		if entry.Type() & os.ModeSymlink != 0 {
+			info := os.stat(path)!
+			data := os.readFile(path)!
+			os.remove(path)!
+			os.writeFile(path, data, info.mode)!
+		}
+		return nil
+	})!
+	for path in filepath.glob(filepath.join(installDir, "bin", "ncurses*-config"))! {
+		os.remove(path)!
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	cflags := ["-DNCURSES_WIDECHAR=1", "-I$${includedir}/ncursesw", "-I$${includedir}"]
+	if target.require["os"][0] == "darwin" {
+		cflags <- "-D_DARWIN_C_SOURCE"
+	}
+	// The static component relationships follow upstream gen-pkgconfig.in:
+	// ncursesw uses tinfow; panel/menu/form/tic use ncursesw.
+	for name in ["tinfow", "ncursesw", "panelw", "menuw", "formw", "ticw"] {
+		var requires []string
+		switch name {
+		case "tinfow":
+		case "ncursesw":
+			requires = ["tinfow"]
+		default:
+			requires = ["ncursesw"]
+		}
+		libs := ["-L$${libdir}", "-l"+name]
+		if name == "ncursesw" && target.require["os"][0] == "linux" {
+			libs <- "-ldl"
+			libs <- "-lm"
+		}
+		pc := pkgconfig.new(
+			name = name,
+			description = "ncurses " + name + " library",
+			version = "6.2.20210501",
+			requires = requires,
+			libs = libs,
+			cflags = cflags,
+		)!
+		pcFile := os.create(filepath.join(pcDir, name+".pc"))!
+		pc.writeTo(pcFile)!
+		pcFile.close()!
+	}
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("ncursesw")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, ctx.Proj.readFile("v6_2_20210501/consumer.c")!, 0o644)!
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "ncurses.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("ncursesw")!), 0o644)!
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "@"+flagsFile, "-o", binary
+	terminfo := filepath.join(installDir, "share", "terminfo")
+	exec! {"TERMINFO": terminfo, "TERMINFO_DIRS": terminfo}, binary
+}
