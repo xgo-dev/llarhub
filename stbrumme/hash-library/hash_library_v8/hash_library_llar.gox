@@ -1,0 +1,130 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "crc32.h"
+#include "keccak.h"
+#include "md5.h"
+#include "sha1.h"
+#include "sha256.h"
+#include "sha3.h"
+
+int main(void) {
+    if (CRC32()("abc") != "352441c2") {
+        return 1;
+    }
+    if (Keccak()("abc") != "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45") {
+        return 2;
+    }
+    if (MD5()("abc") != "900150983cd24fb0d6963f7d28e17f72") {
+        return 3;
+    }
+    if (SHA1()("abc") != "a9993e364706816aba3e25717850c26c9cd0d89d") {
+        return 4;
+    }
+    if (SHA256()("abc") != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") {
+        return 5;
+    }
+    if (SHA3()("abc") != "3a985da74fe225b2045c172d6bd390bd855f086e3e9d525b46bfe24511431532") {
+        return 6;
+    }
+
+    return 0;
+}
+`
+
+id "stbrumme/hash-library"
+
+fromVer "hash_library_v8"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	inputDir := os.mkdirTemp("", "hash-library-build-input-*")!
+	defer os.removeAll(inputDir)
+	for name in [
+		"crc32.cpp", "keccak.cpp", "md5.cpp", "sha1.cpp", "sha256.cpp", "sha3.cpp",
+		"crc32.h", "hash.h", "hmac.h", "keccak.h", "md5.h", "sha1.h", "sha256.h", "sha3.h",
+		"LICENSE",
+	] {
+		cp! filepath.join(ctx.SourceDir, name), filepath.join(inputDir, name)
+	}
+
+	os.writeFile(filepath.join(inputDir, "CMakeLists.txt"), ctx.Proj.readFile("hash_library_v8/CMakeLists.txt")!, 0o644)!
+	if target.require["os"][0] == "darwin" {
+		patchPath := filepath.join(inputDir, "_llar_fix_macos.patch")
+		os.writeFile(patchPath, ctx.Proj.readFile("hash_library_v8/001-fix-macos.patch")!, 0o644)!
+		git! "-C", inputDir, "apply", patchPath
+	}
+
+	c := cmake.new(inputDir, filepath.join(inputDir, "_build"), installDir)
+	c.define "HASH_LIBRARY_SRC_DIR", inputDir
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "hash-library",
+		description = "Portable C++ hashing library",
+		version = "hash_library_v8",
+		libs = ["-L$${libdir}", "-lhash-library"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "hash-library.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("hash-library")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := os.mkdirTemp("", "hash-library-consumer-*")!
+	defer os.removeAll(testDir)
+
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "hash-library.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("hash-library")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
