@@ -52,6 +52,7 @@ onBuild ctx => {
 	a := autotools.new(filepath.join(ctx.SourceDir, "core"), filepath.join(ctx.SourceDir, "core"), installDir)
 	for dep in ctx.Proj.Deps {
 		a.use ctx.outputDir(dep)
+		cflags <- "-I"+filepath.join(ctx.outputDir(dep), "include")
 	}
 	a.build "libs",
 		"MROOT="+ctx.SourceDir,
