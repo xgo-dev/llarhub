@@ -1,0 +1,183 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const gcConsumerSource = `#include <gc.h>
+
+#include <stdlib.h>
+
+int main(void)
+{
+    int result = EXIT_SUCCESS;
+    int *value;
+
+    GC_INIT();
+    value = (int *)GC_MALLOC(sizeof(*value));
+    if (value == NULL || GC_get_version() == 0) {
+        result = EXIT_FAILURE;
+    } else {
+        *value = 42;
+        GC_gcollect();
+        if (*value != 42) {
+            result = EXIT_FAILURE;
+        }
+    }
+    GC_deinit();
+    return result;
+}
+`
+
+const cordConsumerSource = `#include <gc.h>
+#include <gc/cord.h>
+
+#include <stdlib.h>
+
+int main(void)
+{
+    int result = EXIT_SUCCESS;
+
+    GC_INIT();
+    CORD value = CORD_from_char_star("llar");
+    if (value == CORD_EMPTY || CORD_len(value) != 4) {
+        result = EXIT_FAILURE;
+    }
+    GC_deinit();
+    return result;
+}
+`
+
+id "ivmai/bdwgc"
+
+fromVer "v8.2.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onRequire (proj, deps) => {
+	if target.require["os"][0] == "windows" {
+		deps.require "bdwgc/libatomic_ops", "v7.8.2"
+	}
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "build_cord", true
+	c.defineBool "enable_cplusplus", false
+	c.defineBool "enable_large_config", true
+	c.defineBool "build_tests", false
+	c.defineBool "install_headers", true
+	for dep in ctx.Proj.Deps {
+		c.use ctx.outputDir(dep)
+	}
+	if target.require["os"][0] == "windows" {
+		for dep in ctx.Proj.Deps {
+			c.define "CFLAGS_EXTRA", "-I"+filepath.join(ctx.outputDir(dep), "include")
+		}
+	}
+	c.configure
+	c.build
+	c.install
+
+	gcLibs := ["-L$${libdir}", "-lgc"]
+	if target.require["os"][0] == "linux" {
+		gcLibs <- "-lpthread", "-ldl"
+	}
+	cflags := ["-I$${includedir}"]
+	if shared {
+		cflags <- "-DGC_DLL"
+	} else {
+		cflags <- "-DGC_NOT_DLL"
+	}
+	requires := []string{}
+	if target.require["os"][0] == "windows" {
+		requires <- "atomic_ops"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	gcPC := pkgconfig.new(
+		name = "bdw-gc",
+		description = "Boehm-Demers-Weiser Conservative Garbage Collector",
+		version = "v8.2.2",
+		requires = requires,
+		libs = gcLibs,
+		cflags = cflags,
+	)!
+	gcPCFile := os.create(filepath.join(pcDir, "bdw-gc.pc"))!
+	gcPC.writeTo(gcPCFile)!
+	gcPCFile.close()!
+
+	cordPC := pkgconfig.new(
+		name = "cord",
+		description = "Boehm CORD string library",
+		version = "v8.2.2",
+		requires = ["bdw-gc"],
+		libs = ["-L$${libdir}", "-lcord"],
+	)!
+	cordPCFile := os.create(filepath.join(pcDir, "cord.pc"))!
+	cordPC.writeTo(cordPCFile)!
+	cordPCFile.close()!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("bdw-gc")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+
+	gcSource := filepath.join(testDir, "gc_consumer.c")
+	os.writeFile(gcSource, []byte(gcConsumerSource), 0o644)!
+	gcFlags := filepath.join(testDir, "bdw-gc.flags")
+	os.writeFile(gcFlags, []byte(pkgconfig.lookup("bdw-gc")!), 0o644)!
+	gcBinary := filepath.join(testDir, "gc_consumer")
+	cc! "-std=c11", gcSource, "@"+gcFlags, "-o", gcBinary
+	exec! gcBinary
+
+	cordSource := filepath.join(testDir, "cord_consumer.c")
+	os.writeFile(cordSource, []byte(cordConsumerSource), 0o644)!
+	cordFlags := filepath.join(testDir, "cord.flags")
+	os.writeFile(cordFlags, []byte(pkgconfig.lookup("cord")!), 0o644)!
+	cordBinary := filepath.join(testDir, "cord_consumer")
+	cc! "-std=c11", cordSource, "@"+cordFlags, "-o", cordBinary
+	exec! cordBinary
+}
