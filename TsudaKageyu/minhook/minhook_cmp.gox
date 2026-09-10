@@ -1,0 +1,11 @@
+import "strings"
+
+// Upstream mixes unprefixed GNU-style tags (1.2.1.1, 1.2.1A) with v-prefixed
+// releases (v1.3.4). Strip an optional v, then compare as Go semver.
+func normalize(version string) string {
+	return "v" + strings.trimPrefix(version, "v")
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}
