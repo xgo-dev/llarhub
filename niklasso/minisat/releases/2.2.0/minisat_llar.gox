@@ -2,7 +2,21 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
+
+func copyHeaders(src, dst string) {
+	os.mkdirAll(dst, 0o755)!
+	for entry in os.readDir(src)! {
+		from := filepath.join(src, entry.name)
+		to := filepath.join(dst, entry.name)
+		if entry.isDir {
+			copyHeaders from, to
+		} else if entry.name.hasSuffix(".h") || entry.name.hasSuffix(".hpp") {
+			os.writeFile(to, os.readFile(from)!, 0o644)!
+		}
+	}
+}
 
 id "niklasso/minisat"
 
@@ -16,36 +30,50 @@ onBuild ctx => {
 	installDir := ctx.outputDir
 	formulaDir := "releases/2.2.0"
 
-	os.writeFile(
-		filepath.join(ctx.SourceDir, "CMakeLists.txt"),
-		ctx.Proj.readFile(filepath.join(formulaDir, "CMakeLists.txt"))!,
-		0o644,
-	)!
 	for patchName in ["0001-drop-default-arg-in-friend-declaration.patch", "0002-suffix-literal.patch"] {
 		patchPath := filepath.join(ctx.SourceDir, patchName)
 		os.writeFile(patchPath, ctx.Proj.readFile(filepath.join(formulaDir, "patches", patchName))!, 0o644)!
 		git! "-C", ctx.SourceDir, "apply", "--unidiff-zero", patchPath
 	}
 
-	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
-	c.define "MINISAT_SRC_DIR", ctx.SourceDir
-	c.define "CMAKE_INSTALL_LIBDIR", "lib"
-	// Keep Conan's static, PIC defaults. LLAR matrix options also reach
-	// madler/zlib, whose current Formula cannot install under an option matrix.
-	c.defineBool "BUILD_SHARED_LIBS", false
+	// The release's core Makefile builds the static archive without Main.cc.
+	// Keep the object list explicit because GNU Make's filter-out pattern does
+	// not match absolute Main.o paths passed by the LLAR source workspace.
+	objects := []string{
+		filepath.join(ctx.SourceDir, "core", "Solver.o"),
+		filepath.join(ctx.SourceDir, "utils", "Options.o"),
+		filepath.join(ctx.SourceDir, "utils", "System.o"),
+	}
+	cflags := []string{"-Wall", "-Wno-parentheses", "-std=c++11", "-I"+ctx.SourceDir, "-D__STDC_LIMIT_MACROS", "-D__STDC_FORMAT_MACROS"}
 	if !slices.contains(target.require["os"], "windows") {
-		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+		cflags <- "-fPIC"
 	}
+	a := autotools.new(filepath.join(ctx.SourceDir, "core"), filepath.join(ctx.SourceDir, "core"), installDir)
 	for dep in ctx.Proj.Deps {
-		c.use ctx.outputDir(dep)
+		a.use ctx.outputDir(dep)
 	}
-	c.configure
-	c.build
-	c.install
+	a.build "libs",
+		"MROOT="+ctx.SourceDir,
+		"LIB=minisat",
+		"CSRCS=Solver.cc",
+		"COBJS="+strings.join(objects, " "),
+		"CFLAGS="+strings.join(cflags, " ")
 
 	licenseDir := filepath.join(installDir, "licenses")
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	includeDir := filepath.join(installDir, "include", "minisat")
+	for dir in ["mtl", "utils", "core", "simp"] {
+		copyHeaders filepath.join(ctx.SourceDir, dir), filepath.join(includeDir, dir)
+	}
+	libDir := filepath.join(installDir, "lib")
+	os.mkdirAll(libDir, 0o755)!
+	os.writeFile(
+		filepath.join(libDir, "libminisat.a"),
+		os.readFile(filepath.join(ctx.SourceDir, "core", "libminisat_standard.a"))!,
+		0o644,
+	)!
 
 	libs := ["-L$${libdir}", "-lminisat"]
 	if slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd") {
