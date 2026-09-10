@@ -1,0 +1,97 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "rebound.h"
+#include <stdio.h>
+
+int main(void) {
+    struct reb_simulation* r = reb_simulation_create();
+
+    reb_simulation_add_fmt(r, "m", 1.);
+    reb_simulation_add_fmt(r, "m a e", 1e-3, 1., 0.1);
+    reb_simulation_add_fmt(r, "a e", 1.4, 0.1);
+    reb_simulation_integrate(r, 1.);
+
+    for (int i = 0; i < r->N; i++) {
+        struct reb_particle p = r->particles[i];
+        printf("%f %f %f\\n", p.x, p.y, p.z);
+    }
+
+    struct reb_particle primary = r->particles[0];
+    for (int i = 1; i < r->N; i++) {
+        struct reb_particle p = r->particles[i];
+        struct reb_orbit o = reb_orbit_from_particle(r->G, p, primary);
+        printf("%f %f %f\\n", o.a, o.e, o.f);
+    }
+
+    reb_simulation_free(r);
+    return 0;
+}
+`
+
+id "hannorein/rebound"
+
+fromVer "4.4.1"
+
+filter => {
+	return target.require["os"][0] == "linux"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	// The upstream root Makefile's librebound target builds src/librebound.so
+	// but has no install target, so keep the Autotools helper in the source tree
+	// and publish the verified Conan package layout explicitly.
+	a := autotools.new(ctx.SourceDir, ctx.SourceDir, installDir)
+	a.build "librebound"
+
+	includeDir := filepath.join(installDir, "include")
+	libDir := filepath.join(installDir, "lib")
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(libDir, 0o755)!
+	os.mkdirAll(licenseDir, 0o755)!
+	for header in filepath.glob(filepath.join(ctx.SourceDir, "src", "*.h"))! {
+		cp! header, filepath.join(includeDir, filepath.base(header))
+	}
+	cp! filepath.join(ctx.SourceDir, "src", "librebound.so"), filepath.join(libDir, "librebound.so")
+	cp! filepath.join(ctx.SourceDir, "LICENSE"), filepath.join(licenseDir, "LICENSE")
+
+	pcDir := filepath.join(libDir, "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "rebound",
+		description = "REBOUND N-body integrator",
+		version = "4.4.1",
+		libs = ["-L$${libdir}", "-lrebound", "-lpthread"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "rebound.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("rebound")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "rebound.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("rebound")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	exec! binary
+}
