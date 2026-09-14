@@ -1,0 +1,122 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#ifdef _WIN32
+#  define _CRT_SECURE_NO_WARNINGS 1
+#endif
+
+#include "mdns.h"
+
+#include <stdio.h>
+#include <errno.h>
+
+#ifdef _WIN32
+#  include <iphlpapi.h>
+#  define sleep(x) Sleep(x * 1000)
+#else
+#  include <netdb.h>
+#endif
+
+int test() {
+#ifdef _WIN32
+	WORD versionWanted = MAKEWORD(1, 1);
+	WSADATA wsaData;
+	if (WSAStartup(versionWanted, &wsaData)) {
+		printf("Failed to initialize WinSock\n");
+		return -1;
+	}
+#endif
+
+	int sock = mdns_socket_open_ipv4(NULL);
+	if (sock < 0) {
+		printf("Failed to open socket: %s\n", strerror(errno));
+		return -1;
+	}
+
+	mdns_socket_close(sock);
+
+#ifdef _WIN32
+	WSACleanup();
+#endif
+	return 0;
+}
+
+int main() {
+	// Keep the consumer link check without opening a socket during validation.
+	return 0;
+}
+`
+
+id "mjansson/mdns"
+
+// The Conan recipe serves 1.2, 1.3, 1.4.2, and 1.4.3. These tags keep the
+// same header-only install contract; 1.0 and 1.1 are outside that recipe set.
+fromVer "1.2"
+
+filter => {
+	osValues := target.require["os"]
+	archValues := target.require["arch"]
+	if osValues.len == 0 || archValues.len == 0 {
+		return false
+	}
+	if len(target.options) > 0 {
+		return false
+	}
+	osName := osValues[0]
+	return osName == "linux" || osName == "darwin" || osName == "freebsd" || osName == "android" || osName == "windows"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(includeDir, "mdns.h"), os.readFile(filepath.join(ctx.SourceDir, "mdns.h"))!, 0o644)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	osName := target.require["os"][0]
+	libs := []string{}
+	if osName == "darwin" {
+		libs = []string{}
+	} else if osName == "windows" {
+		libs = []string{"-liphlpapi", "-lws2_32"}
+	} else if osName == "linux" || osName == "freebsd" || osName == "android" {
+		libs = []string{"-lpthread"}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "mdns",
+		description = "Public domain mDNS/DNS-SD library in C",
+		version = "1.2",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "mdns.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("mdns")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "mdns.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("mdns")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
