@@ -1,0 +1,162 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <edlib.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int fail(const char *msg, EdlibAlignResult result) {
+    fprintf(stderr, "%s (status=%d distance=%d)\n", msg, result.status, result.editDistance);
+    edlibFreeAlignResult(result);
+    return 1;
+}
+
+int main(void) {
+    EdlibAlignResult result = edlibAlign("hello", 5, "world!", 6, edlibDefaultAlignConfig());
+    if (result.status != EDLIB_STATUS_OK || result.editDistance < 0) {
+        return fail("default NW distance", result);
+    }
+    edlibFreeAlignResult(result);
+
+    EdlibAlignConfig locCfg = edlibNewAlignConfig(-1, EDLIB_MODE_SHW, EDLIB_TASK_LOC, NULL, 0);
+    result = edlibAlign("AACT", 4, "AACTGGC", 7, locCfg);
+    if (result.status != EDLIB_STATUS_OK || result.editDistance != 0 ||
+        result.numLocations <= 0 || result.endLocations == NULL || result.startLocations == NULL) {
+        return fail("prefix loc", result);
+    }
+    edlibFreeAlignResult(result);
+
+    EdlibAlignConfig pathCfg = edlibNewAlignConfig(-1, EDLIB_MODE_HW, EDLIB_TASK_PATH, NULL, 0);
+    result = edlibAlign("ACT", 3, "CGACTGAC", 8, pathCfg);
+    if (result.status != EDLIB_STATUS_OK || result.editDistance != 0 ||
+        result.alignment == NULL || result.alignmentLength <= 0) {
+        return fail("infix path", result);
+    }
+
+    char *extended = edlibAlignmentToCigar(result.alignment, result.alignmentLength, EDLIB_CIGAR_EXTENDED);
+    char *standard = edlibAlignmentToCigar(result.alignment, result.alignmentLength, EDLIB_CIGAR_STANDARD);
+    if (extended == NULL || standard == NULL || extended[0] == '\0' || standard[0] == '\0') {
+        free(extended);
+        free(standard);
+        return fail("cigar", result);
+    }
+    free(extended);
+    free(standard);
+    edlibFreeAlignResult(result);
+
+    EdlibEqualityPair equalities[] = {{'a', 'A'}};
+    EdlibAlignConfig eqCfg = edlibNewAlignConfig(-1, EDLIB_MODE_NW, EDLIB_TASK_DISTANCE, equalities, 1);
+    result = edlibAlign("a", 1, "A", 1, eqCfg);
+    if (result.status != EDLIB_STATUS_OK || result.editDistance != 0) {
+        return fail("additional equalities", result);
+    }
+    edlibFreeAlignResult(result);
+
+    return 0;
+}
+`
+
+id "Martinsos/edlib"
+
+fromVer "v1.2.7"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "EDLIB_BUILD_EXAMPLES", false
+	c.defineBool "EDLIB_BUILD_UTILITIES", false
+	c.defineBool "EDLIB_ENABLE_INSTALL", true
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-ledlib"]
+	if !shared {
+		if osName == "linux" || osName == "freebsd" {
+			libs <- "-lm"
+			libs <- "-lstdc++"
+		} else if osName == "darwin" {
+			libs <- "-lc++"
+		}
+	}
+
+	cflags := ["-I$${includedir}"]
+	if shared {
+		cflags <- "-DEDLIB_SHARED"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "edlib",
+		description = "Lightweight and super fast C/C++ library for sequence alignment using edit distance",
+		version = "v1.2.7",
+		URL = "https://github.com/Martinsos/edlib",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "edlib-1.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("edlib-1")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "edlib-1.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("edlib-1")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		libDir := filepath.join(installDir, "lib")
+		exec! {"LD_LIBRARY_PATH": libDir, "DYLD_LIBRARY_PATH": libDir}, binary
+	} else {
+		exec! binary
+	}
+}
