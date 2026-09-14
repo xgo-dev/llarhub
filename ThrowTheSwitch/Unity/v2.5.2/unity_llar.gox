@@ -1,0 +1,143 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <unity.h>
+
+
+void setUp(void)
+{
+}
+
+void tearDown(void)
+{
+}
+
+void test_Something(void)
+{
+    TEST_ASSERT_EQUAL_INT(1, 1);
+}
+
+int main(void)
+{
+    UNITY_BEGIN();
+    RUN_TEST(test_Something);
+    return UNITY_END();
+}
+`
+
+const fixtureConsumerSource = `#include <unity_fixture.h>
+
+static void runAllTests(void)
+{
+}
+
+int main(void)
+{
+    const char* argv[] = {"unity-consumer"};
+    return UnityMain(1, argv, runAllTests);
+}
+`
+
+const memoryConsumerSource = `#include <unity_memory.h>
+
+void setUp(void)
+{
+}
+
+void tearDown(void)
+{
+}
+
+int main(void)
+{
+    UnityMalloc_StartTest();
+    UnityMalloc_EndTest();
+    return 0;
+}
+`
+
+id "ThrowTheSwitch/Unity"
+
+fromVer "v2.5.2"
+
+defaults {
+	"fPIC": "ON",
+	"fixture_extension": "OFF",
+	"memory_extension": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "fPIC" && name != "fixture_extension" && name != "memory_extension" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	fPIC := target.options["fPIC"][0] == "ON"
+	fixtureExtension := target.options["fixture_extension"][0] == "ON"
+	memoryExtension := target.options["memory_extension"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "UNITY_EXTENSION_FIXTURE", fixtureExtension
+	c.defineBool "UNITY_EXTENSION_MEMORY", memoryExtension
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "unity",
+		description = "Unity Test is a unit testing framework built for C, with a focus on working with embedded toolchains",
+		version = "v2.5.2",
+		libs = ["-L$${libdir}", "-lunity"],
+		cflags = ["-I$${includedir}/unity"],
+	)!
+	out := os.create(filepath.join(pcDir, "unity.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("unity")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	source := consumerSource
+	if target.options["fixture_extension"][0] == "ON" {
+		source = fixtureConsumerSource
+	} else if target.options["memory_extension"][0] == "ON" {
+		source = memoryConsumerSource
+	}
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(source), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "unity.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("unity")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+	exec! binary
+}
