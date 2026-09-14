@@ -1,0 +1,178 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <stdio.h>
+
+#include <tinyalsa/pcm.h>
+
+int main(void)
+{
+    printf("TinyALSA test_package\n");
+
+    unsigned int card = 0;
+    unsigned int device = 0;
+    int flags = PCM_IN;
+
+    const struct pcm_config config = {
+        .channels = 2,
+        .rate = 48000,
+        .format = PCM_FORMAT_S32_LE,
+        .period_size = 1024,
+        .period_count = 2,
+        .start_threshold = 1024,
+        .silence_threshold = 1024 * 2,
+        .stop_threshold = 1024 * 2
+    };
+
+    struct pcm *pcm = pcm_open(card, device, flags, &config);
+    pcm_close(pcm);
+
+    return 0;
+}
+`
+
+id "tinyalsa/tinyalsa"
+
+fromVer "1.1.1"
+
+defaults {
+	"shared": "OFF",
+	"with_utils": "OFF",
+}
+
+filter => {
+	if target.require["os"][0] != "linux" {
+		return false
+	}
+	for name, values in target.options {
+		if name != "shared" && name != "with_utils" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	withUtils := target.options["with_utils"][0] == "ON"
+	destDir := strings.replace(installDir, "|", "\\|", -1)
+
+	for relativePath in ["src/Makefile", "utils/Makefile"] {
+		makefilePath := filepath.join(ctx.SourceDir, relativePath)
+		source := string(os.readFile(makefilePath)!)
+		source = strings.replace(source, "CC = $(CROSS_COMPILE)gcc\n", "", 1)
+		os.writeFile(makefilePath, []byte(source), 0o644)!
+	}
+
+	sourcePath := filepath.join(ctx.SourceDir, "src", "Makefile")
+	source := string(os.readFile(sourcePath)!)
+	source = strings.replace(source, "AR = $(CROSS_COMPILE)ar\n", "", 1)
+	source = strings.replace(source, "LD = $(CROSS_COMPILE)gcc\n", "", 1)
+	source = strings.replace(source, "$(LD) $(LDFLAGS)", "$(CC) $(LDFLAGS)", 1)
+	os.writeFile(sourcePath, []byte(source), 0o644)!
+
+	utilsPath := filepath.join(ctx.SourceDir, "utils", "Makefile")
+	utils := string(os.readFile(utilsPath)!)
+	utils = strings.replace(utils, "CFLAGS += -L ../src\n", "LDFLAGS += -L ../src\n", 1)
+	utils = strings.replace(utils, `tinyplay: tinyplay.c pcm.h mixer.h asoundlib.h libtinyalsa.a
+
+tinycap: tinycap.c pcm.h mixer.h asoundlib.h libtinyalsa.a
+
+tinymix: tinymix.c pcm.h mixer.h asoundlib.h libtinyalsa.a
+
+tinypcminfo: tinypcminfo.c pcm.h mixer.h asoundlib.h libtinyalsa.a`, `tinyplay: tinyplay.o libtinyalsa.a
+
+tinyplay.o: tinyplay.c pcm.h mixer.h asoundlib.h
+
+tinycap: tinycap.o libtinyalsa.a
+
+tinycap.o: tinycap.c pcm.h mixer.h asoundlib.h
+
+tinymix: tinymix.o libtinyalsa.a
+
+tinymix.o: tinymix.c pcm.h mixer.h asoundlib.h
+
+tinypcminfo: tinypcminfo.o libtinyalsa.a
+
+tinypcminfo.o: tinypcminfo.c pcm.h mixer.h asoundlib.h`, 1)
+	os.writeFile(utilsPath, []byte(utils), 0o644)!
+
+	a := autotools.new(ctx.SourceDir, ctx.SourceDir, installDir)
+	a.build "-C", "src"
+	if withUtils {
+		a.build "-C", "utils"
+	}
+	a.install "-C", "src", "DESTDIR="+destDir, "PREFIX="
+	if withUtils {
+		a.install "-C", "utils", "DESTDIR="+destDir, "PREFIX="
+	}
+
+	libDir := filepath.join(installDir, "lib")
+	if shared {
+		os.remove(filepath.join(libDir, "libtinyalsa.a"))!
+	} else {
+		for sharedPath in filepath.glob(filepath.join(libDir, "libtinyalsa.so*"))! {
+			os.remove(sharedPath)!
+		}
+	}
+
+	includeDir := filepath.join(installDir, "include", "tinyalsa")
+	os.mkdirAll(includeDir, 0o755)!
+	for headerPath in filepath.glob(filepath.join(ctx.SourceDir, "include", "tinyalsa", "*.h"))! {
+		cp! headerPath, filepath.join(includeDir, filepath.base(headerPath))
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	cp! filepath.join(ctx.SourceDir, "NOTICE"), filepath.join(licenseDir, "NOTICE")
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "tinyalsa",
+		description = "A small library to interface with ALSA in the Linux kernel",
+		version = "1.1.1",
+		libs = ["-L$${libdir}", "-ltinyalsa"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "tinyalsa.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("tinyalsa")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "tinyalsa.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("tinyalsa")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+	if target.options["with_utils"][0] == "ON" {
+		exec! filepath.join(installDir, "bin", "tinymix"), "--help"
+	}
+}
