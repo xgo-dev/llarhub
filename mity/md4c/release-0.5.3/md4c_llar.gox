@@ -1,0 +1,177 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "md4c.h"
+
+#include <stdio.h>
+#include <string.h>
+
+int enter_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
+    printf("enter block\n");
+    return 0;
+}
+
+int leave_block(MD_BLOCKTYPE type, void* detail, void* userdata) {
+    printf("leave block\n");
+    return 0;
+}
+
+int enter_span(MD_SPANTYPE type, void* detail, void* userdata) {
+    printf("enter span\n");
+    return 0;
+}
+
+int leave_span(MD_SPANTYPE type, void* detail, void* userdata) {
+    printf("leave span\n");
+    return 0;
+}
+
+int text_block(MD_TEXTTYPE type, const MD_CHAR* text, MD_SIZE size, void* userdata) {
+    printf("text block\n");
+    return 0;
+}
+
+int main(void) {
+    const char DATA[] =
+        "# title\n"
+        "\n"
+        "example1\n"
+        "example2\n"
+        "\n"
+        "> example3\n"
+        "\n";
+
+    printf("%s\n", DATA);
+
+    MD_PARSER parser;
+    parser.abi_version = 0;
+    parser.flags = MD_FLAG_TABLES;
+    parser.enter_block = enter_block;
+    parser.leave_block = leave_block;
+    parser.enter_span = enter_span;
+    parser.leave_span = leave_span;
+    parser.text = text_block;
+
+    return md_parse(DATA, strlen(DATA), &parser, NULL);
+}
+`
+
+id "mity/md4c"
+
+fromVer "release-0.5.3"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"md2html": "ON",
+	"encoding": "utf-8",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "md2html" && name != "encoding" {
+			return false
+		}
+		for value in values {
+			if (name == "shared" || name == "fPIC" || name == "md2html") && value != "ON" && value != "OFF" {
+				return false
+			}
+			if name == "encoding" && value != "utf-8" && value != "utf-16" && value != "ascii" {
+				return false
+			}
+		}
+	}
+	return target.options["encoding"][0] != "utf-16" || target.require["os"][0] == "windows"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	md2html := target.options["md2html"][0] == "ON"
+	encoding := target.options["encoding"][0]
+	encodingMacro := "MD4C_USE_UTF8"
+	if encoding == "utf-16" {
+		encodingMacro = "MD4C_USE_UTF16"
+	} else if encoding == "ascii" {
+		encodingMacro = "MD4C_USE_ASCII"
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	if encoding != "utf-8" {
+		// The 0.5.3 source has no encoding option; pass the selected macro
+		// through CMake without rewriting the upstream project files.
+		c.define "CMAKE_C_FLAGS", "-D"+encodingMacro
+	}
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "BUILD_MD2HTML_EXECUTABLE", md2html
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.md"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.md"))!, 0o644)!
+
+	parserCflags := ["-I$${includedir}"]
+	if encoding == "utf-16" {
+		parserCflags <- "-DMD4C_USE_UTF16"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	version := "release-0.5.3"
+	parserPC := pkgconfig.new(
+		name = "MD4C",
+		description = "Markdown parser library with a SAX-like callback-based interface.",
+		version = version,
+		URL = "https://github.com/mity/md4c",
+		libs = ["-L$${libdir}", "-lmd4c"],
+		cflags = parserCflags,
+	)!
+	out := os.create(filepath.join(pcDir, "md4c.pc"))!
+	parserPC.writeTo(out)!
+	out.close()!
+
+	htmlPC := pkgconfig.new(
+		name = "MD4C HTML renderer",
+		description = "Markdown to HTML converter library.",
+		version = version,
+		URL = "https://github.com/mity/md4c",
+		requires = ["md4c = " + version],
+		libs = ["-L$${libdir}", "-lmd4c-html"],
+		cflags = parserCflags,
+	)!
+	out = os.create(filepath.join(pcDir, "md4c-html.pc"))!
+	htmlPC.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("md4c")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "md4c.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("md4c")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
