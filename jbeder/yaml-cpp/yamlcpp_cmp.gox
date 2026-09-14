@@ -1,0 +1,21 @@
+import "strings"
+
+// Tags mix release-*, yaml-cpp-*, and bare semantic versions. Normalize all
+// spellings before comparing; keep the original spelling as a tie-break for
+// the release-0.5.3 and yaml-cpp-0.5.3 aliases.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "release-") {
+		version = strings.trimPrefix(version, "release-")
+	} else if strings.hasPrefix(version, "yaml-cpp-") {
+		version = strings.trimPrefix(version, "yaml-cpp-")
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	cmp := semver.Compare(normalize(a.Version), normalize(b.Version))
+	if cmp != 0 {
+		return cmp
+	}
+	return strings.compare(a.Version, b.Version)
+}
