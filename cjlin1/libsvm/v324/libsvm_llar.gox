@@ -1,0 +1,261 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <svm/svm.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static void silent(const char *s) {
+	(void)s;
+}
+
+int main(void) {
+	struct svm_node nodes[2][2];
+	struct svm_node *x[2];
+	double y[2];
+	struct svm_problem prob;
+	struct svm_parameter param;
+	struct svm_model *model;
+	struct svm_model *loaded;
+	const char *err;
+	double pred;
+	int nrClass;
+	int nrSV;
+	int labels[8];
+	int svIndices[8];
+	int i;
+
+	if (LIBSVM_VERSION < 324 || libsvm_version < 324) {
+		fprintf(stderr, "unexpected libsvm version %d / %d\n", LIBSVM_VERSION, libsvm_version);
+		return 1;
+	}
+
+	svm_set_print_string_function(silent);
+
+	nodes[0][0].index = 1;
+	nodes[0][0].value = -1;
+	nodes[0][1].index = -1;
+	nodes[1][0].index = 1;
+	nodes[1][0].value = 1;
+	nodes[1][1].index = -1;
+	x[0] = nodes[0];
+	x[1] = nodes[1];
+	y[0] = -1;
+	y[1] = 1;
+
+	prob.l = 2;
+	prob.y = y;
+	prob.x = x;
+
+	memset(&param, 0, sizeof(param));
+	param.svm_type = C_SVC;
+	param.kernel_type = LINEAR;
+	param.degree = 3;
+	param.gamma = 0.5;
+	param.coef0 = 0;
+	param.nu = 0.5;
+	param.cache_size = 16;
+	param.C = 1;
+	param.eps = 1e-3;
+	param.p = 0.1;
+	param.shrinking = 1;
+	param.probability = 0;
+	param.nr_weight = 0;
+	param.weight_label = NULL;
+	param.weight = NULL;
+
+	err = svm_check_parameter(&prob, &param);
+	if (err != NULL) {
+		fprintf(stderr, "svm_check_parameter: %s\n", err);
+		return 1;
+	}
+
+	model = svm_train(&prob, &param);
+	if (model == NULL) {
+		fprintf(stderr, "svm_train failed\n");
+		return 1;
+	}
+
+	nrClass = svm_get_nr_class(model);
+	nrSV = svm_get_nr_sv(model);
+	svm_get_labels(model, labels);
+	svm_get_sv_indices(model, svIndices);
+	if (svm_get_svm_type(model) != C_SVC || nrClass != 2 || nrSV <= 0) {
+		fprintf(stderr, "unexpected model svm_type=%d nr_class=%d nr_sv=%d\n",
+			svm_get_svm_type(model), nrClass, nrSV);
+		svm_free_and_destroy_model(&model);
+		return 1;
+	}
+
+	for (i = 0; i < 2; i++) {
+		double dec;
+		pred = svm_predict_values(model, x[i], &dec);
+		if (pred != y[i] || svm_predict(model, x[i]) != pred) {
+			fprintf(stderr, "unexpected prediction %g for label %g\n", pred, y[i]);
+			svm_free_and_destroy_model(&model);
+			return 1;
+		}
+	}
+	if (svm_check_probability_model(model) != 0) {
+		fprintf(stderr, "unexpected probability model\n");
+		svm_free_and_destroy_model(&model);
+		return 1;
+	}
+
+	if (svm_save_model("__LIBSVM_MODEL_PATH__", model) != 0) {
+		fprintf(stderr, "svm_save_model failed\n");
+		svm_free_and_destroy_model(&model);
+		return 1;
+	}
+	svm_free_and_destroy_model(&model);
+
+	loaded = svm_load_model("__LIBSVM_MODEL_PATH__");
+	if (loaded == NULL) {
+		fprintf(stderr, "svm_load_model failed\n");
+		return 1;
+	}
+	pred = svm_predict(loaded, x[0]);
+	svm_free_and_destroy_model(&loaded);
+	if (pred != y[0]) {
+		fprintf(stderr, "unexpected reloaded prediction %g\n", pred);
+		return 1;
+	}
+
+	svm_destroy_param(&param);
+	printf("libsvm version %d ok\n", LIBSVM_VERSION);
+	return 0;
+}
+`
+
+id "cjlin1/libsvm"
+
+fromVer "v324"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	osName := target.require["os"][0]
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	cflags := "-Wall -Wconversion -O3"
+	if shared || fPIC {
+		cflags += " -fPIC"
+	}
+
+	makeOS := "Linux"
+	if osName == "darwin" {
+		makeOS = "Darwin"
+	}
+
+	a := autotools.new(ctx.SourceDir, ctx.SourceDir, installDir)
+	if shared {
+		a.build "lib", "CFLAGS="+cflags, "OS="+makeOS
+	} else {
+		a.build "libsvm.a(svm.o)", "CFLAGS="+cflags
+	}
+	a.build "all", "CFLAGS="+cflags
+
+	includeDir := filepath.join(installDir, "include", "svm")
+	libDir := filepath.join(installDir, "lib")
+	binDir := filepath.join(installDir, "bin")
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(libDir, 0o755)!
+	os.mkdirAll(binDir, 0o755)!
+	os.mkdirAll(licenseDir, 0o755)!
+
+	cp! filepath.join(ctx.SourceDir, "svm.h"), filepath.join(includeDir, "svm.h")
+	cp! filepath.join(ctx.SourceDir, "COPYRIGHT"), filepath.join(licenseDir, "COPYRIGHT")
+	for name in ["svm-train", "svm-predict", "svm-scale"] {
+		cp! filepath.join(ctx.SourceDir, name), filepath.join(binDir, name)
+	}
+
+	if shared {
+		matches := filepath.glob(filepath.join(ctx.SourceDir, "libsvm.so.*"))!
+		if matches.len == 0 {
+			panic "libsvm shared library was not produced"
+		}
+		cp! matches[0], filepath.join(libDir, filepath.base(matches[0]))
+		libName := "libsvm.so"
+		if osName == "darwin" {
+			libName = "libsvm.dylib"
+		}
+		cp! matches[0], filepath.join(libDir, libName)
+	} else {
+		cp! filepath.join(ctx.SourceDir, "libsvm.a"), filepath.join(libDir, "libsvm.a")
+	}
+
+	libs := ["-L$${libdir}", "-lsvm"]
+	if !shared {
+		if osName == "linux" || osName == "freebsd" {
+			libs <- "-lm"
+			libs <- "-lstdc++"
+		} else if osName == "darwin" {
+			libs <- "-lc++"
+		} else {
+			libs <- "-lstdc++"
+		}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libsvm",
+		description = "Libsvm is a simple, easy-to-use, and efficient software for SVM classification and regression",
+		version = "v324",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "libsvm.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libsvm")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	modelPath := filepath.join(testDir, "libsvm-test.model")
+	os.writeFile(sourcePath, []byte(consumerSource.replaceAll("__LIBSVM_MODEL_PATH__", modelPath)), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libsvm.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libsvm")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
