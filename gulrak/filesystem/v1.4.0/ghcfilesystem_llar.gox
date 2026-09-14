@@ -1,0 +1,68 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <ghc/filesystem.hpp>
+#include <iostream>
+
+int main(int argc, char** argv) {
+    std::cout << "Version: " << GHC_FILESYSTEM_VERSION << std::endl;
+    ghc::filesystem::path program{argv[0]};
+    std::cout << "Program: " << ghc::filesystem::absolute(program) << std::endl;
+    return 0;
+}
+`
+
+id "gulrak/filesystem"
+
+fromVer "v1.4.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "GHC_FILESYSTEM_BUILD_TESTING", false
+	c.defineBool "GHC_FILESYSTEM_BUILD_EXAMPLES", false
+	c.defineBool "GHC_FILESYSTEM_WITH_INSTALL", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "ghc-filesystem",
+		description = "A header-only single-file std::filesystem compatible helper library",
+		version = "v1.4.0",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "ghc-filesystem.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("ghc-filesystem")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "ghc-filesystem.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("ghc-filesystem")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
