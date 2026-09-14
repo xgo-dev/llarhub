@@ -1,0 +1,14 @@
+import "strings"
+
+// async_simple publishes unprefixed 1.0, 1.1, 1.2, and 1.4 tags plus v1.3.
+// Normalize the optional v prefix so the complete tag set has numeric order.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}

@@ -1,0 +1,191 @@
+import (
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const headerOnlyConsumer = `#include <cstdlib>
+#include <iostream>
+
+#include "async_simple/coro/Lazy.h"
+#include "async_simple/coro/SyncAwait.h"
+
+using namespace async_simple::coro;
+
+Lazy<int> foo() {
+    co_return 1;
+}
+
+int main() {
+    std::cout << "test async_simple" << std::endl;
+    auto ret = syncAwait(foo());
+    if (ret != 1) {
+        std::cout << "ERROR: " << ret << std::endl;
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
+}
+`
+
+id "alibaba/async_simple"
+
+// The complete upstream tag set (1.0, 1.1, 1.2, v1.3, and 1.4) keeps the
+// Conan package's header and optional uthread library layout compatible.
+fromVer "1.0"
+
+defaults {
+	"header_only": "ON",
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "header_only" && name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+
+	// The upstream CMake project only enables its compiled uthread sources on
+	// Linux and Darwin, so compiled mode is limited to those source-proven OSes.
+	headerOnly := target.options["header_only"][0] == "ON"
+	if !headerOnly && !slices.contains(target.require["os"], "linux") && !slices.contains(target.require["os"], "darwin") {
+		return false
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	headerOnly := target.options["header_only"][0] == "ON"
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	if !headerOnly {
+		// The upstream CMake pins the libstdc++ ABI to 1. Keep this downstream
+		// adjustment pending Linux consumer/toolchain ABI validation.
+		cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+		source := string(os.readFile(cmakeLists)!)
+		source = strings.replace(source, "-D_GLIBCXX_USE_CXX11_ABI=1", "", 1)
+		os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+		c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+		c.buildType "Release"
+		c.defineBool "ASYNC_SIMPLE_ENABLE_TESTS", false
+		c.defineBool "ASYNC_SIMPLE_BUILD_DEMO_EXAMPLE", false
+		c.defineBool "ASYNC_SIMPLE_DISABLE_AIO", true
+		if !shared {
+			c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+		}
+		c.configure
+		c.build
+		c.install
+
+		// Keep the upstream-installed headers and CMake package metadata. Conan's
+		// compiled package() also uses cmake.install without removing them.
+		libDir := filepath.join(installDir, "lib")
+		if shared {
+			for archive in filepath.glob(filepath.join(libDir, "*.a"))! {
+				os.removeAll(archive)!
+			}
+		} else {
+			for archive in filepath.glob(filepath.join(libDir, "*.a"))! {
+				if filepath.base(archive) != "libasync_simple.a" {
+					os.rename(archive, filepath.join(libDir, "libasync_simple.a"))!
+					break
+				}
+			}
+			for pattern in ["libasync_simple.so*", "libasync_simple.dylib*"] {
+				for library in filepath.glob(filepath.join(libDir, pattern))! {
+					os.removeAll(library)!
+				}
+			}
+		}
+	}
+
+	if headerOnly {
+		// Match Conan's header-only package: omit tests everywhere and uthread
+		// headers on Macos, while retaining executors and Linux uthread headers.
+		sourceDir := filepath.join(ctx.SourceDir, "async_simple")
+		includeDir := filepath.join(installDir, "include", "async_simple")
+		os.mkdirAll(includeDir, 0o755)!
+		filepath.walkDir(sourceDir, (path, entry, err) => {
+			if err != nil {
+				return err
+			}
+			if entry.isDir {
+				if entry.name == "test" || (osName == "darwin" && entry.name == "uthread") {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if !entry.name.hasSuffix(".h") {
+				return nil
+			}
+			relative := filepath.rel(sourceDir, path)!
+			destination := filepath.join(includeDir, relative)
+			os.mkdirAll(filepath.dir(destination), 0o755)!
+			os.writeFile(destination, os.readFile(path)!, 0o644)!
+			return nil
+		})!
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := []string{}
+	if !headerOnly {
+		libs <- "-L$${libdir}", "-lasync_simple"
+	}
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lm", "-lpthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "async_simple",
+		description = "Simple, light-weight and easy-to-use asynchronous components",
+		version = "1.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "async_simple.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("async_simple")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	headerOnly := target.options["header_only"][0] == "ON"
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(headerOnlyConsumer), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "async_simple.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("async_simple")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++20", consumer, "-o", binary, "@"+flagsFile
+
+	if !headerOnly && target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
