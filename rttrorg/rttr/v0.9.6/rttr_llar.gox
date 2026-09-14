@@ -1,0 +1,156 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <cstdlib>
+#include <iostream>
+#include <vector>
+
+#include <rttr/type>
+
+using dblvec = std::vector<double>;
+
+int main()
+{
+    auto type = rttr::type::get<dblvec>();
+    std::cout << "type name: " << type.get_name() << std::endl;
+    return EXIT_SUCCESS;
+}
+`
+
+id "rttrorg/rttr"
+
+fromVer "v0.9.6"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"with_rtti": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "with_rtti" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	withRtti := target.options["with_rtti"][0] == "ON"
+
+	// Conan's 001_fix_build_without_RTTI.patch fixes quoted compiler-option
+	// replacement for BUILD_WITH_RTTI=OFF.
+	utilityPath := filepath.join(ctx.SourceDir, "CMake", "utility.cmake")
+	utility := string(os.readFile(utilityPath)!)
+	utility = strings.replace(utility,
+		`string(REGEX REPLACE "$${_OLD_OPTION} " "$${_NEW_OPTION}"`,
+		`string(REGEX REPLACE "$${_OLD_OPTION} " "$${_NEW_OPTION} "`, 1)
+	utility = strings.replace(utility,
+		`set($${flag_var} "$${$${flag_var}} $${_NEW_OPTION}")`,
+		`set($${flag_var} "$${$${flag_var}} $${_NEW_OPTION} ")`, 1)
+	utility = strings.replace(utility,
+		`replace_compiler_option($${enable_rtti_opt} $${disable_rtti_opt})`,
+		`replace_compiler_option("$${enable_rtti_opt}" "$${disable_rtti_opt}")`, 1)
+	os.writeFile(utilityPath, []byte(utility), 0o644)!
+
+	// The Conan recipe removes RTTR's -Werror setup so the installed library
+	// builds with current compilers without changing its public interface.
+	cmakeListsPath := filepath.join(ctx.SourceDir, "src", "rttr", "CMakeLists.txt")
+	cmakeLists := string(os.readFile(cmakeListsPath)!)
+	targetName := "rttr_core"
+	if !shared {
+		targetName = "rttr_core_lib"
+	}
+	warningCall := "    set_compiler_warnings("+targetName+")\n"
+	if !strings.contains(cmakeLists, warningCall) {
+		panic "failed to locate RTTR warning settings"
+	}
+	cmakeLists = strings.replace(cmakeLists, warningCall, "", 1)
+	os.writeFile(cmakeListsPath, []byte(cmakeLists), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	// Current CMake rejects this upstream's VERSION 3.0 baseline without the
+	// policy floor; this is only a configure policy compatibility setting.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_RTTR_DYNAMIC", shared
+	c.defineBool "BUILD_STATIC", !shared
+	c.defineBool "BUILD_WITH_RTTI", withRtti
+	c.defineBool "BUILD_UNIT_TESTS", false
+	c.defineBool "BUILD_BENCHMARKS", false
+	c.defineBool "BUILD_EXAMPLES", false
+	c.defineBool "BUILD_DOCUMENTATION", false
+	c.defineBool "BUILD_PACKAGE", false
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!, 0o644)!
+
+	osName := target.require["os"][0]
+	libs := ["-L$${libdir}", "-lrttr_core"]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-ldl"
+		libs <- "-lpthread"
+	}
+	cflags := ["-I$${includedir}"]
+	if shared {
+		cflags <- "-DRTTR_DLL"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "rttr",
+		description = "Run Time Type Reflection library",
+		version = "v0.9.6",
+		URL = "https://github.com/rttrorg/rttr",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "rttr.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("rttr")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "rttr.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("rttr")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
