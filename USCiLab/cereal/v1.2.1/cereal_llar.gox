@@ -1,0 +1,118 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <cstdlib>
+#include <iostream>
+
+#include <cereal/archives/binary.hpp>
+
+
+struct Data
+{
+    int x, y, z;
+    template<class Archive>
+    void serialize(Archive & archive) { archive( x, y, z ); }
+};
+
+
+int main() {
+    std::cout << "Serialized data: ";
+    {
+        cereal::BinaryOutputArchive oarchive(std::cout);
+        Data d1{42, 12, 52};
+        Data d2{33, 34, 35};
+        Data d3{74, 34, 45};
+        oarchive(d1, d2, d3);
+    }
+    std::cout << std::endl;
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "USCiLab/cereal"
+fromVer "v1.2.1"
+
+defaults {
+	"thread_safe": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "thread_safe" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	threadSafe := target.options["thread_safe"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	// CMake 4 rejects cereal's pre-3.5 minimum; this is the documented
+	// compatibility override for the v1.2.1-v1.3.0 source range.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "JUST_INSTALL_CEREAL", true
+	c.defineBool "THREAD_SAFE", threadSafe
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	cflags := ["-I$${includedir}"]
+	if threadSafe {
+		cflags <- "-DCEREAL_THREAD_SAFE=1"
+	}
+
+	libs := []string{}
+	if target.require["os"][0] == "linux" || target.require["os"][0] == "freebsd" {
+		if threadSafe {
+			libs <- "-lpthread"
+		}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "cereal",
+		description = "Serialization header-only library for C++11",
+		version = "v1.2.1",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "cereal.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("cereal")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "cereal.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("cereal")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
