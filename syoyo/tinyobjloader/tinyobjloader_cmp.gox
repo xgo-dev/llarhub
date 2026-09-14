@@ -1,0 +1,29 @@
+import "strings"
+
+// The complete upstream tag set mixes v2.0-rc1, v2.0.0-rc1..rc4, and
+// v2.0.0rc5..rc13 spellings. Normalize those historical forms, expand v1.0,
+// and use a lexical tie-breaker for aliases that resolve to one release.
+func normalize(version string) string {
+	version = strings.trimPrefix(version, "v")
+	if version == "1.0" {
+		return "v1.0.0"
+	}
+	if strings.hasPrefix(version, "2.0-rc") {
+		return "v2.0.0-rc." + strings.trimPrefix(version, "2.0-rc")
+	}
+	if strings.hasPrefix(version, "2.0.0-rc") {
+		return "v2.0.0-rc." + strings.trimPrefix(version, "2.0.0-rc")
+	}
+	if strings.hasPrefix(version, "2.0.0rc") {
+		return "v2.0.0-rc." + strings.trimPrefix(version, "2.0.0rc")
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	cmp := semver.Compare(normalize(a.Version), normalize(b.Version))
+	if cmp != 0 {
+		return cmp
+	}
+	return strings.compare(a.Version, b.Version)
+}
