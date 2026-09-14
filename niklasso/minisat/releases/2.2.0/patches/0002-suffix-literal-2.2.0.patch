@@ -1,0 +1,13 @@
+diff --git a/minisat/utils/Options.h b/minisat/utils/Options.h
+index 2dba10f..ea7c185 100644
+--- a/utils/Options.h
++++ b/utils/Options.h
+@@ -285 +285 @@ class Int64Option
+-            fprintf(stderr, "%4"PRIi64, range.begin);
++            fprintf(stderr, "%4" PRIi64, range.begin);
+@@ -291 +291 @@ class Int64Option
+-            fprintf(stderr, "%4"PRIi64, range.end);
++            fprintf(stderr, "%4" PRIi64, range.end);
+@@ -293 +293 @@ class Int64Option
+-        fprintf(stderr, "] (default: %"PRIi64")\n", value);
++        fprintf(stderr, "] (default: %" PRIi64")\n", value);

@@ -1,0 +1,10 @@
+diff --git a/core/SolverTypes.h b/core/SolverTypes.h
+index 1ebcc73..7b1d16a 100644
+--- a/core/SolverTypes.h
++++ b/core/SolverTypes.h
+@@ -50 +50 @@ struct Lit {
+-    friend Lit mkLit(Var var, bool sign = false);
++    //friend Lit mkLit(Var var, bool sign = false);
+@@ -58 +58 @@ struct Lit {
+-inline  Lit  mkLit     (Var var, bool sign) { Lit p; p.x = var + var + (int)sign; return p; }
++inline  Lit  mkLit     (Var var, bool sign = false) { Lit p; p.x = var + var + (int)sign; return p; }
