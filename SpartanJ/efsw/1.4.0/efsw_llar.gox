@@ -1,0 +1,129 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <iostream>
+#include <cstdlib>
+#include "efsw/efsw.hpp"
+
+int main() {
+    efsw::FileWatcher* fileWatcher = new efsw::FileWatcher();
+
+    std::cout << "Follows symlinks?: " << fileWatcher->followSymlinks() << std::endl;
+
+    delete fileWatcher;
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "SpartanJ/efsw"
+
+fromVer "1.4.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(
+		source,
+		"set(CMAKE_POSITION_INDEPENDENT_CODE ON)",
+		"",
+		1,
+	)
+	source = strings.replace(
+		source,
+		"target_compile_options(efsw PRIVATE -Wall -Wno-long-long -fPIC)",
+		"target_compile_options(efsw PRIVATE -Wall -Wno-long-long)",
+		1,
+	)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "BUILD_STATIC_LIBS", false
+	c.defineBool "BUILD_TEST_APP", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lefsw"]
+	osName := target.require["os"][0]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lm"
+		libs <- "-lpthread"
+	} else if osName == "darwin" {
+		libs <- "-framework"
+		libs <- "CoreFoundation"
+		libs <- "-framework"
+		libs <- "CoreServices"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "efsw",
+		description = "efsw is a C++ cross-platform file system watcher and notifier.",
+		version = "1.4.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "efsw.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("efsw")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "efsw.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("efsw")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
