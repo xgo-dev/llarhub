@@ -1,0 +1,176 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#ifndef _WIN32
+#include <unistd.h>
+#endif
+#include <string.h>
+#include <usrsctp.h>
+
+int main(void) {
+	struct sockaddr_in addr;
+	struct socket *sock;
+	struct sctpstat stats;
+	socklen_t optLen;
+	uint32_t sendspace;
+	int on;
+	int i;
+	char *dump;
+
+	usrsctp_init(0, NULL, NULL);
+	usrsctp_sysctl_set_sctp_blackhole(2);
+	usrsctp_sysctl_set_sctp_no_csum_on_loopback(0);
+	sendspace = usrsctp_sysctl_get_sctp_sendspace();
+	if (usrsctp_sysctl_set_sctp_sendspace(sendspace) != 0) {
+		return 1;
+	}
+
+	sock = usrsctp_socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP, NULL, NULL, 0, NULL);
+	if (sock == NULL) {
+		return 1;
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = 0;
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+	addr.sin_len = (uint8_t)sizeof(addr);
+#endif
+	if (usrsctp_bind(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+		usrsctp_close(sock);
+		return 1;
+	}
+	if (usrsctp_listen(sock, 1) != 0) {
+		usrsctp_close(sock);
+		return 1;
+	}
+
+	on = 1;
+	if (usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_RECVRCVINFO, &on, sizeof(on)) != 0) {
+		usrsctp_close(sock);
+		return 1;
+	}
+	optLen = sizeof(on);
+	if (usrsctp_getsockopt(sock, IPPROTO_SCTP, SCTP_RECVRCVINFO, &on, &optLen) != 0) {
+		usrsctp_close(sock);
+		return 1;
+	}
+	if (usrsctp_set_non_blocking(sock, 1) != 0) {
+		usrsctp_close(sock);
+		return 1;
+	}
+	if (usrsctp_get_non_blocking(sock) != 1) {
+		usrsctp_close(sock);
+		return 1;
+	}
+
+	usrsctp_register_address((void *)sock);
+	usrsctp_deregister_address((void *)sock);
+	usrsctp_crc32c("sctp", 4);
+	usrsctp_get_stat(&stats);
+	dump = usrsctp_dumppacket("sctp", 4, SCTP_DUMP_OUTBOUND);
+	if (dump != NULL) {
+		usrsctp_freedumpbuffer(dump);
+	}
+	usrsctp_handle_timers(10);
+	usrsctp_close(sock);
+
+	for (i = 0; i < 5; i++) {
+		if (usrsctp_finish() == 0) {
+			return 0;
+		}
+#ifndef _WIN32
+		usleep(100000);
+#endif
+	}
+	return 0;
+}
+`
+
+id "sctplab/usrsctp"
+
+fromVer "0.9.5.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	patchPath := filepath.join(ctx.SourceDir, "_llar_install.patch")
+	os.writeFile(patchPath, ctx.Proj.readFile("0.9.5.0/0001-install.patch")!, 0o644)!
+	git! "-C", ctx.SourceDir, "apply", "--unidiff-zero", patchPath
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "sctp_debug", false
+	c.defineBool "sctp_werror", false
+	c.defineBool "sctp_build_shared_lib", shared
+	c.defineBool "sctp_build_programs", false
+	if osName == "windows" && shared {
+		c.defineBool "CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS", true
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.md"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.md"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lusrsctp"]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lpthread"
+	} else if osName == "windows" {
+		libs <- ["-lws2_32", "-liphlpapi"]...
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "usrsctp",
+		description = "SCTP implementation",
+		version = "0.9.5.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "usrsctp.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("usrsctp")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "usrsctp.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("usrsctp")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
