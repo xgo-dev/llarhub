@@ -1,0 +1,193 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <qrencode.h>
+
+#include <stdio.h>
+#include <string.h>
+
+static int fail(const char *msg) {
+	fprintf(stderr, "%s\n", msg);
+	return 1;
+}
+
+int main(void) {
+	int major = 0, minor = 0, micro = 0;
+	QRcode_APIVersion(&major, &minor, &micro);
+	const char *version = QRcode_APIVersionString();
+	if (version == NULL || version[0] == '\0') {
+		return fail("QRcode_APIVersionString returned empty");
+	}
+	if (major < 4) {
+		return fail("unexpected API major version");
+	}
+
+	QRcode *code = QRcode_encodeString("llarhub", 0, QR_ECLEVEL_L, QR_MODE_8, 1);
+	if (code == NULL || code->width <= 0 || code->data == NULL) {
+		return fail("QRcode_encodeString failed");
+	}
+
+	QRcode *eight = QRcode_encodeString8bit("llarhub", 0, QR_ECLEVEL_M);
+	if (eight == NULL) {
+		QRcode_free(code);
+		return fail("QRcode_encodeString8bit failed");
+	}
+
+	const unsigned char payload[] = {'L', 'L', 'A', 'R', 0, 'Q', 'R'};
+	QRcode *raw = QRcode_encodeData((int)sizeof(payload), payload, 0, QR_ECLEVEL_Q);
+	if (raw == NULL) {
+		QRcode_free(code);
+		QRcode_free(eight);
+		return fail("QRcode_encodeData failed");
+	}
+
+	QRinput *input = QRinput_new2(0, QR_ECLEVEL_L);
+	if (input == NULL) {
+		QRcode_free(code);
+		QRcode_free(eight);
+		QRcode_free(raw);
+		return fail("QRinput_new2 failed");
+	}
+	const char *digits = "01234567";
+	if (QRinput_append(input, QR_MODE_NUM, (int)strlen(digits), (const unsigned char *)digits) != 0) {
+		QRinput_free(input);
+		QRcode_free(code);
+		QRcode_free(eight);
+		QRcode_free(raw);
+		return fail("QRinput_append failed");
+	}
+	QRcode *fromInput = QRcode_encodeInput(input);
+	if (fromInput == NULL) {
+		QRinput_free(input);
+		QRcode_free(code);
+		QRcode_free(eight);
+		QRcode_free(raw);
+		return fail("QRcode_encodeInput failed");
+	}
+
+	QRcode *mqr = QRcode_encodeStringMQR("1", 1, QR_ECLEVEL_L, QR_MODE_8, 0);
+	if (mqr == NULL) {
+		QRinput_free(input);
+		QRcode_free(fromInput);
+		QRcode_free(code);
+		QRcode_free(eight);
+		QRcode_free(raw);
+		return fail("QRcode_encodeStringMQR failed");
+	}
+
+	QRcode_List *list = QRcode_encodeStringStructured("structured-append", 1, QR_ECLEVEL_L, QR_MODE_8, 1);
+	if (list == NULL || QRcode_List_size(list) <= 0) {
+		QRcode_free(mqr);
+		QRinput_free(input);
+		QRcode_free(fromInput);
+		QRcode_free(code);
+		QRcode_free(eight);
+		QRcode_free(raw);
+		return fail("QRcode_encodeStringStructured failed");
+	}
+
+	QRcode_List_free(list);
+	QRcode_free(mqr);
+	QRinput_free(input);
+	QRcode_free(fromInput);
+	QRcode_free(code);
+	QRcode_free(eight);
+	QRcode_free(raw);
+	printf("libqrencode %s ok\n", version);
+	return 0;
+}
+`
+
+id "fukuchi/libqrencode"
+
+fromVer "v4.0.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.defineBool "WITH_TOOLS", false
+	c.defineBool "WITH_TESTS", false
+	c.defineBool "CMAKE_DISABLE_FIND_PACKAGE_PNG", true
+	c.defineBool "CMAKE_DISABLE_FIND_PACKAGE_Iconv", true
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lqrencode"]
+	if target.require["os"][0] == "linux" || target.require["os"][0] == "freebsd" {
+		libs <- "-lpthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libqrencode",
+		description = "A QR Code encoding library",
+		version = "v4.0.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "libqrencode.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libqrencode")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libqrencode.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libqrencode")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
