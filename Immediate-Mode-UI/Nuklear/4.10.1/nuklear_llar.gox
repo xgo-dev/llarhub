@@ -1,0 +1,73 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#define NK_IMPLEMENTATION
+#define NK_INCLUDE_DEFAULT_ALLOCATOR
+#define NK_INCLUDE_FIXED_TYPES
+#include <nuklear.h>
+
+int main() {
+  struct nk_context ctx;
+  nk_init_default(&ctx, NULL);
+
+  return 0;
+}
+`
+
+id "Immediate-Mode-UI/Nuklear"
+
+fromVer "4.10.1"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+	os.writeFile(filepath.join(includeDir, "nuklear.h"), os.readFile(filepath.join(ctx.SourceDir, "nuklear.h"))!, 0o644)!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "src", "LICENSE"))!, 0o644)!
+
+	var libs []string
+	osName := target.require["os"][0]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "nuklear",
+		description = "A single-header ANSI C immediate mode cross-platform GUI library.",
+		version = "4.10.1",
+		URL = "https://github.com/Immediate-Mode-UI/Nuklear",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "nuklear.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("nuklear")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "nuklear.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("nuklear")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
