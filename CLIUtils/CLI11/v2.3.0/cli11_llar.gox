@@ -1,0 +1,117 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <CLI/CLI.hpp>
+#include <iostream>
+#include <string>
+
+int main(int argc, char **argv) {
+    int count{0};
+    int v{0};
+    double value{0.0};
+    std::string file;
+    CLI::App app("K3Pi goofit fitter");
+
+    CLI::Option *opt = app.add_option("-f,--file,file", file, "File name");
+    CLI::Option *copt = app.add_option("-c,--count", count, "Counter");
+    CLI::Option *flag = app.add_flag("--flag", v, "Some flag that can be passed multiple times");
+
+    app.add_option("-d,--double", value, "Some Value");
+    CLI11_PARSE(app, argc, argv);
+
+    std::cout << "Working on file: " << file << ", direct count: " << app.count("--file")
+              << ", opt count: " << opt->count() << std::endl;
+    std::cout << "Working on count: " << count << ", direct count: " << app.count("--count")
+              << ", opt count: " << copt->count() << std::endl;
+    std::cout << "Received flag: " << v << " (" << flag->count() << ") times\n";
+    std::cout << "Some value: " << value << std::endl;
+
+    return 0;
+}
+`
+
+id "CLIUtils/CLI11"
+
+fromVer "v2.3.0"
+
+defaults {
+	"header_only": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "header_only" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	headerOnly := target.options["header_only"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_INSTALL_DATADIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "CLI11_PRECOMPILED", !headerOnly
+	c.defineBool "CLI11_BUILD_EXAMPLES", false
+	c.defineBool "CLI11_BUILD_TESTS", false
+	c.defineBool "CLI11_BUILD_DOCS", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := []string{}
+	cflags := ["-I$${includedir}"]
+	if !headerOnly {
+		libs <- "-L$${libdir}"
+		libs <- "-lCLI11"
+		cflags <- "-DCLI11_COMPILE"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "CLI11",
+		description = "C++ command line parser",
+		version = "v2.3.0",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "CLI11.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("CLI11")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "CLI11.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("CLI11")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
