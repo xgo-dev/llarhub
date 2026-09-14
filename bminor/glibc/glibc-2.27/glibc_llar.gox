@@ -1,0 +1,13 @@
+id "bminor/glibc"
+
+fromVer "glibc-2.27"
+
+filter => {
+    return target.require["os"][0] == "linux" &&
+        (target.require["arch"][0] == "amd64" || target.require["arch"][0] == "arm64")
+}
+
+// Source builds are deferred; a prebuilt Bootlin sysroot will be supplied separately.
+onBuild ctx => {
+    panic("glibc source builds are not supported; a prebuilt sysroot artifact is required")
+}
