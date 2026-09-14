@@ -1,0 +1,242 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <enet/enet.h>
+
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    ENetVersion version;
+    ENetAddress address;
+    ENetHost *host;
+    ENetPacket *packet;
+    ENetBuffer buffer;
+    ENetEvent event;
+    void *coder;
+    unsigned char compressed[64];
+    char ip[64];
+    const char payload[] = "llar-enet";
+    enet_uint32 crc;
+    size_t n;
+
+    if (enet_initialize() != 0) {
+        return 1;
+    }
+
+    version = enet_linked_version();
+    if (ENET_VERSION_GET_MAJOR(version) != ENET_VERSION_MAJOR) {
+        enet_deinitialize();
+        return 1;
+    }
+
+    enet_time_set(1);
+    if (enet_time_get() < 1) {
+        enet_deinitialize();
+        return 1;
+    }
+
+    memset(&address, 0, sizeof(address));
+    if (enet_address_set_host_ip(&address, "127.0.0.1") != 0) {
+        enet_deinitialize();
+        return 1;
+    }
+    address.port = ENET_PORT_ANY;
+    if (enet_address_get_host_ip(&address, ip, sizeof(ip)) != 0) {
+        enet_deinitialize();
+        return 1;
+    }
+
+    host = enet_host_create(NULL, 1, 2, 0, 0);
+    if (host == NULL) {
+        enet_deinitialize();
+        return 1;
+    }
+
+    packet = enet_packet_create(payload, sizeof(payload), ENET_PACKET_FLAG_RELIABLE);
+    if (packet == NULL) {
+        enet_host_destroy(host);
+        enet_deinitialize();
+        return 1;
+    }
+    if (enet_packet_resize(packet, sizeof(payload) + 4) < 0) {
+        enet_packet_destroy(packet);
+        enet_host_destroy(host);
+        enet_deinitialize();
+        return 1;
+    }
+
+    buffer.data = packet->data;
+    buffer.dataLength = packet->dataLength;
+    crc = enet_crc32(&buffer, 1);
+
+    coder = enet_range_coder_create();
+    if (coder == NULL) {
+        enet_packet_destroy(packet);
+        enet_host_destroy(host);
+        enet_deinitialize();
+        return 1;
+    }
+    n = enet_range_coder_compress(coder, &buffer, 1, buffer.dataLength, compressed, sizeof(compressed));
+    enet_range_coder_destroy(coder);
+    if (n == 0) {
+        enet_packet_destroy(packet);
+        enet_host_destroy(host);
+        enet_deinitialize();
+        return 1;
+    }
+
+    if (enet_host_compress_with_range_coder(host) != 0) {
+        enet_packet_destroy(packet);
+        enet_host_destroy(host);
+        enet_deinitialize();
+        return 1;
+    }
+    enet_host_compress(host, NULL);
+    enet_host_channel_limit(host, 1);
+    enet_host_bandwidth_limit(host, 0, 0);
+    enet_host_broadcast(host, 0, packet);
+    enet_host_flush(host);
+    enet_host_check_events(host, &event);
+    enet_host_service(host, &event, 0);
+
+    printf("enet %u.%u.%u crc=%u ip=%s compressed=%zu\n",
+        ENET_VERSION_GET_MAJOR(version),
+        ENET_VERSION_GET_MINOR(version),
+        ENET_VERSION_GET_PATCH(version),
+        crc, ip, n);
+
+    enet_host_destroy(host);
+    enet_deinitialize();
+    return 0;
+}
+`
+
+id "lsalzman/enet"
+
+fromVer "v1.3.18"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	// Reuse upstream's configure.ac/Makefile.am so libtool controls the
+	// shared/static target. Stage outside LLAR's option-encoded output path;
+	// libtool treats a '|' in its -rpath as shell syntax.
+	os.chdir(ctx.SourceDir)!
+	if exec("libtoolize", "--copy", "--force") != nil {
+		glibtoolize! "--copy", "--force"
+	}
+	autoreconf! "-fi"
+
+	picFlag := "--without-pic"
+	if fPIC {
+		picFlag = "--with-pic"
+	}
+	stageDir := filepath.join(ctx.SourceDir, "_llar_install")
+	a := autotools.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), stageDir)
+	if shared {
+		a.configure "--enable-shared", "--disable-static", picFlag
+	} else {
+		a.configure "--disable-shared", "--enable-static", picFlag
+	}
+	a.build
+	a.install
+
+	includeDir := filepath.join(installDir, "include", "enet")
+	os.mkdirAll(includeDir, 0o755)!
+	for path in filepath.glob(filepath.join(stageDir, "include", "enet", "*.h"))! {
+		cp! path, filepath.join(includeDir, filepath.base(path))
+	}
+
+	libDir := filepath.join(installDir, "lib")
+	os.mkdirAll(libDir, 0o755)!
+	for path in filepath.glob(filepath.join(stageDir, "lib", "libenet*"))! {
+		cp! path, filepath.join(libDir, filepath.base(path))
+	}
+	os.removeAll(filepath.join(libDir, "libenet.la"))!
+	if shared && osName == "darwin" {
+		dylib := filepath.join(libDir, "libenet.7.dylib")
+		// Keep the unversioned name as an alias of the real SONAME file. The
+		// alias must not acquire a second install ID when staging is copied.
+		alias := filepath.join(libDir, "libenet.dylib")
+		os.removeAll(alias)!
+		exec! "ln", "-s", "libenet.7.dylib", alias
+		exec! "install_name_tool", "-id", "@rpath/libenet.7.dylib", dylib
+	}
+	os.removeAll(stageDir)!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lenet"]
+	cflags := ["-I$${includedir}"]
+	if osName == "windows" {
+		libs <- ["-lwinmm", "-lws2_32"]...
+		if shared {
+			cflags <- "-DENET_DLL"
+		}
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libenet",
+		description = "Low-latency UDP networking library supporting optional reliability",
+		version = "v1.3.18",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "libenet.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libenet")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libenet.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libenet")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
