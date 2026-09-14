@@ -1,0 +1,134 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+const consumerSource = `#include <iostream>
+#include "Simd/SimdLib.hpp"
+
+int main(void) {
+    Simd::PrintInfo(std::cout);
+}
+`
+
+id "ermig1979/Simd"
+
+fromVer "v6.1.138"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	osName := target.require["os"][0]
+	arch := target.require["arch"][0]
+	if osName != "linux" && osName != "darwin" {
+		return false
+	}
+	if arch != "amd64" && arch != "arm64" {
+		return false
+	}
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	osName := target.require["os"][0]
+	arch := target.require["arch"][0]
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	if osName == "darwin" && arch == "arm64" {
+		// The upstream arm.cmake compiler check matches the compiler name, not
+		// AppleClang's compiler id. Select clang++ so its verified no-mfpu path
+		// is used on Darwin arm64.
+		os.setenv("CC", "clang")!
+		os.setenv("CXX", "clang++")!
+	}
+
+	xmlPath := filepath.join(ctx.SourceDir, "src", "Simd", "SimdXml.hpp")
+	xml := string(os.readFile(xmlPath)!)
+	patchedXML := strings.replace(xml, "++this;", "++*this;", -1)
+	for iteratorName in ["NodeIterator", "AttributeIterator"] {
+		start := strings.index(patchedXML, iteratorName + " operator--(int)")
+		if start >= 0 {
+			offset := strings.index(patchedXML[start:], "++*this;")
+			if offset >= 0 {
+				offset += start
+				patchedXML = patchedXML[:offset] + "--*this;" + patchedXML[offset+len("++*this;"):]
+			}
+		}
+	}
+	if patchedXML != xml {
+		os.writeFile(xmlPath, []byte(patchedXML), 0o644)!
+	}
+
+	c := cmake.new(filepath.join(ctx.SourceDir, "prj", "cmake"), filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.defineBool "SIMD_TEST", false
+	c.defineBool "SIMD_SHARED", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lSimd"]
+	if slices.contains(target.require["os"], "linux") {
+		libs <- "-lpthread"
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "Simd",
+		description = "C++ image processing and machine learning library with SIMD",
+		version = "v6.1.138",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "Simd.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("Simd")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsPath := filepath.join(testDir, "Simd.flags")
+	os.writeFile(flagsPath, []byte(pkgconfig.lookup("Simd")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", sourcePath, "-o", binary, "@"+flagsPath
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
