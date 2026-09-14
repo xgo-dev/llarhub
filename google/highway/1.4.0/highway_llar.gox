@@ -18,6 +18,33 @@ int main() {
 }
 `
 
+const contribSource = `#include "hwy/contrib/image/image.h"
+#include "hwy/contrib/sort/vqsort.h"
+#include "hwy/contrib/thread_pool/thread_pool.h"
+
+#include <cstdint>
+
+int main() {
+    uint32_t keys[4] = {3u, 1u, 4u, 2u};
+    hwy::VQSort(keys, 4, hwy::SortAscending());
+    if (keys[0] > keys[1] || keys[1] > keys[2] || keys[2] > keys[3]) {
+        return 1;
+    }
+
+    hwy::Image<float> img(8, 8);
+    if (img.xsize() != 8) {
+        return 1;
+    }
+
+    hwy::ThreadPool pool(0);
+    pool.Run(0, 4, [&](uint64_t task, size_t worker) {
+        (void)task;
+        (void)worker;
+    });
+    return 0;
+}
+`
+
 id "google/highway"
 
 fromVer "1.4.0"
@@ -71,6 +98,12 @@ onBuild ctx => {
 	os.mkdirAll(licenseDir, 0o755)!
 	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
 
+	// thread_pool.h includes hwy/stats.h, but 1.4.0's HWY_SOURCES omits it so
+	// cmake does not install the header.
+	hwyInclude := filepath.join(installDir, "include", "hwy")
+	os.mkdirAll(hwyInclude, 0o755)!
+	os.writeFile(filepath.join(hwyInclude, "stats.h"), os.readFile(filepath.join(ctx.SourceDir, "hwy", "stats.h"))!, 0o644)!
+
 	linux := slices.contains(target.require["os"], "linux")
 	pcDir := filepath.join(installDir, "lib", "pkgconfig")
 	os.mkdirAll(pcDir, 0o755)!
@@ -99,12 +132,14 @@ onBuild ctx => {
 	contribLibs := ["-L$${libdir}", "-lhwy_contrib"]
 	if linux {
 		contribLibs <- "-lm"
+		contribLibs <- "-lpthread"
 	}
 	contribCflags := ["-I$${includedir}"]
 	contrib := pkgconfig.new(
 		name = "libhwy-contrib",
 		description = "Additions to Highway: dot product, image, math, sort",
 		version = "1.4.0",
+		requires = ["libhwy"],
 		libs = contribLibs,
 		cflags = contribCflags,
 	)!
@@ -140,17 +175,26 @@ onTest ctx => {
 
 	consumer := filepath.join(testDir, "consumer.cpp")
 	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+	contribConsumer := filepath.join(testDir, "contrib.cpp")
+	os.writeFile(contribConsumer, []byte(contribSource), 0o644)!
 
 	pkgconfig.use installDir
+	flags := pkgconfig.lookup("libhwy")!
+	contribFlags := pkgconfig.lookup("libhwy-contrib")!
 	flagsFile := filepath.join(testDir, "libhwy.flags")
-	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libhwy")!), 0o644)!
+	os.writeFile(flagsFile, []byte(flags), 0o644)!
+	contribFlagsFile := filepath.join(testDir, "libhwy-contrib.flags")
+	os.writeFile(contribFlagsFile, []byte(contribFlags), 0o644)!
 
 	binary := filepath.join(testDir, "consumer")
 	exec! "c++", "-std=c++11", consumer, "@"+flagsFile, "-o", binary
+	contribBinary := filepath.join(testDir, "contrib")
+	exec! "c++", "-std=c++17", contribConsumer, "@"+contribFlagsFile, "@"+flagsFile, "-o", contribBinary
 
 	if target.options["shared"][0] == "ON" {
 		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
 	}
 	exec! binary
+	exec! contribBinary
 }
