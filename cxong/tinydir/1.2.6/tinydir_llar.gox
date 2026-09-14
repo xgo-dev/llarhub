@@ -1,0 +1,83 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <stdio.h>
+
+#include "tinydir.h"
+
+int main(void)
+{
+    tinydir_dir dir;
+    if (tinydir_open(&dir, ".") != 0)
+        return 1;
+
+    while (dir.has_next)
+    {
+        tinydir_file file;
+        if (tinydir_readfile(&dir, &file) != 0)
+        {
+            tinydir_close(&dir);
+            return 1;
+        }
+
+        printf("%s%s\n", file.name, file.is_dir ? "/" : "");
+        if (tinydir_next(&dir) != 0)
+        {
+            tinydir_close(&dir);
+            return 1;
+        }
+    }
+
+    tinydir_close(&dir);
+    return 0;
+}
+`
+
+id "cxong/tinydir"
+
+fromVer "1.2.6"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+	os.writeFile(filepath.join(includeDir, "tinydir.h"), os.readFile(filepath.join(ctx.SourceDir, "tinydir.h"))!, 0o644)!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "tinydir",
+		description = "Lightweight, portable and easy to integrate C directory and file reader",
+		version = "1.2.6",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "tinydir.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("tinydir")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "tinydir.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("tinydir")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
