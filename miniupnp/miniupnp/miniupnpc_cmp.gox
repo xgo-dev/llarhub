@@ -1,0 +1,14 @@
+// The miniupnp monorepo publishes minissdpd_, miniupnpc_, and miniupnpd_
+// tags together. GNU order ranks miniupnpd after miniupnpc, so an unpinned
+// selection would check out the daemon. Keep the client-library line first.
+compareVer (a, b) => {
+	aLib := a.Version.hasPrefix("miniupnpc_")
+	bLib := b.Version.hasPrefix("miniupnpc_")
+	if aLib != bLib {
+		if aLib {
+			return 1
+		}
+		return -1
+	}
+	return gnu.compare(a.Version, b.Version)
+}

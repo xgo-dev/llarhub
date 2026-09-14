@@ -1,0 +1,256 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include <stdio.h>
+#include <string.h>
+
+#include <miniupnpc/igd_desc_parse.h>
+#include <miniupnpc/miniupnpc.h>
+#include <miniupnpc/miniupnpc_declspec.h>
+#include <miniupnpc/miniupnpctypes.h>
+#include <miniupnpc/miniwget.h>
+#include <miniupnpc/portlistingparse.h>
+#include <miniupnpc/upnpcommands.h>
+#include <miniupnpc/upnpdev.h>
+#include <miniupnpc/upnperrors.h>
+#include <miniupnpc/upnpreplyparse.h>
+
+static const char soapReply[] =
+    "<NewExternalIPAddress>203.0.113.1</NewExternalIPAddress>"
+    "<errorCode>0</errorCode>";
+
+static const char portListing[] =
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+    "<p:PortMappingList xmlns:p=\"urn:schemas-upnp-org:gw:WANIPConnection\">"
+    " <p:PortMappingEntry>"
+    "  <p:NewRemoteHost></p:NewRemoteHost>"
+    "  <p:NewExternalPort>5002</p:NewExternalPort>"
+    "  <p:NewProtocol>UDP</p:NewProtocol>"
+    "  <p:NewInternalPort>4001</p:NewInternalPort>"
+    "  <p:NewInternalClient>192.168.1.123</p:NewInternalClient>"
+    "  <p:NewEnabled>1</p:NewEnabled>"
+    "  <p:NewDescription>xxx</p:NewDescription>"
+    "  <p:NewLeaseTime>0</p:NewLeaseTime>"
+    " </p:PortMappingEntry>"
+    "</p:PortMappingList>";
+
+static const char igdDesc[] =
+    "<?xml version=\"1.0\"?>"
+    "<root><URLBase>http://192.0.2.1:1234</URLBase>"
+    "<device><deviceType>urn:schemas-upnp-org:device:InternetGatewayDevice:1</deviceType>"
+    "</device></root>";
+
+int main(void) {
+    struct NameValueParserData nvp;
+    struct PortMappingParserData ports;
+    struct IGDdatas igd;
+    struct UPNPUrls urls;
+    const char *err;
+    char *ip;
+    int error = 0;
+    struct UPNPDev *devlist;
+    char extIP[40];
+    UNSIGNED_INTEGER bytesSent;
+
+    if (MINIUPNPC_API_VERSION < 17) {
+        return 1;
+    }
+    if (strcmp(MINIUPNPC_VERSION, "") == 0) {
+        return 1;
+    }
+
+    err = strupnperror(UPNPCOMMAND_INVALID_ARGS);
+    if (err == NULL || strstr(err, "Invalid") == NULL) {
+        return 1;
+    }
+    if (strupnperror(UPNPCOMMAND_SUCCESS) == NULL) {
+        return 1;
+    }
+
+    memset(&nvp, 0, sizeof nvp);
+    ParseNameValue(soapReply, (int)strlen(soapReply), &nvp);
+    ip = GetValueFromNameValueList(&nvp, "NewExternalIPAddress");
+    if (ip == NULL || strcmp(ip, "203.0.113.1") != 0) {
+        ClearNameValueList(&nvp);
+        return 1;
+    }
+    ClearNameValueList(&nvp);
+
+    memset(&ports, 0, sizeof ports);
+    ParsePortListing(portListing, (int)strlen(portListing), &ports);
+    if (ports.l_head == NULL || ports.l_head->externalPort != 5002 ||
+        strcmp(ports.l_head->protocol, "UDP") != 0 ||
+        strcmp(ports.l_head->internalClient, "192.168.1.123") != 0) {
+        FreePortListing(&ports);
+        return 1;
+    }
+    FreePortListing(&ports);
+
+    memset(&igd, 0, sizeof igd);
+    parserootdesc(igdDesc, (int)strlen(igdDesc), &igd);
+    if (strcmp(igd.urlbase, "http://192.0.2.1:1234") != 0) {
+        return 1;
+    }
+
+    memset(&urls, 0, sizeof urls);
+    GetUPNPUrls(&urls, &igd, "http://192.0.2.1:1234/rootDesc.xml", 0);
+    if (urls.rootdescURL == NULL) {
+        return 1;
+    }
+    if (UPNPIGD_IsConnected(&urls, &igd) != 0) {
+        FreeUPNPUrls(&urls);
+        return 1;
+    }
+    FreeUPNPUrls(&urls);
+
+    if (UPNP_GetExternalIPAddress(NULL, NULL, extIP) != UPNPCOMMAND_INVALID_ARGS) {
+        return 1;
+    }
+    if (UPNP_AddPortMapping("", "", NULL, NULL, NULL, "llar", NULL, "", "0") !=
+        UPNPCOMMAND_INVALID_ARGS) {
+        return 1;
+    }
+    if (UPNP_DeletePortMapping("", "", NULL, NULL, "") != UPNPCOMMAND_INVALID_ARGS) {
+        return 1;
+    }
+    bytesSent = UPNP_GetTotalBytesSent("", "");
+    if (bytesSent != (UNSIGNED_INTEGER)UPNPCOMMAND_HTTP_ERROR) {
+        return 1;
+    }
+    if (UPNP_GetStatusInfo("", "", NULL, NULL, NULL) != UPNPCOMMAND_INVALID_ARGS) {
+        return 1;
+    }
+
+    error = 0;
+    devlist = upnpDiscover(1, 0, 0, UPNP_LOCAL_PORT_ANY, 0, 2, &error);
+    freeUPNPDevlist(devlist);
+    devlist = upnpDiscoverAll(1, 0, 0, UPNP_LOCAL_PORT_ANY, 0, 2, &error);
+    freeUPNPDevlist(devlist);
+    devlist = upnpDiscoverDevice("urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+                                 1, 0, 0, UPNP_LOCAL_PORT_ANY, 0, 2, &error);
+    freeUPNPDevlist(devlist);
+
+    (void)miniwget;
+    (void)miniwget_getaddr;
+    (void)simpleUPnPcommand;
+    (void)UPNP_GetConnectionTypeInfo;
+    (void)UPNP_GetLinkLayerMaxBitRates;
+    (void)UPNP_GetSpecificPortMappingEntry;
+    (void)UPNP_GetGenericPortMappingEntry;
+    (void)UPNP_GetListOfPortMappings;
+    (void)UPNP_DeletePortMappingRange;
+    (void)UPNP_GetFirewallStatus;
+    (void)UPNP_GetIGDFromUrl;
+    return 0;
+}
+`
+
+id "miniupnp/miniupnp"
+
+fromVer "miniupnpc_2_2_5"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	cmakeLists := filepath.join(ctx.SourceDir, "miniupnpc", "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	source = strings.replace(source, "set(CMAKE_POSITION_INDEPENDENT_CODE ON)", "", 1)
+	os.writeFile(cmakeLists, []byte(source), 0o644)!
+
+	c := cmake.new(filepath.join(ctx.SourceDir, "miniupnpc"), filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "UPNPC_BUILD_STATIC", !shared
+	c.defineBool "UPNPC_BUILD_SHARED", shared
+	c.defineBool "UPNPC_BUILD_TESTS", false
+	c.defineBool "UPNPC_BUILD_SAMPLE", false
+	c.defineBool "NO_GETADDRINFO", false
+	c.defineBool "UPNPC_NO_INSTALL", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	libName := "miniupnpc"
+	if osName == "windows" && !shared {
+		libName = "libminiupnpc"
+	}
+	libs := ["-L$${libdir}", "-l"+libName]
+	if osName == "windows" {
+		libs <- "-liphlpapi", "-lws2_32"
+	} else if osName == "solaris" || osName == "illumos" {
+		libs <- "-lsocket", "-lnsl", "-lresolv"
+	}
+
+	cflags := ["-I$${includedir}"]
+	if !shared {
+		cflags <- "-DMINIUPNP_STATICLIB"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "miniupnpc",
+		description = "UPnP IGD client lightweight library",
+		version = "miniupnpc_2_2_5",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "miniupnpc.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("miniupnpc")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "miniupnpc.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("miniupnpc")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
