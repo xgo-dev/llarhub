@@ -1,0 +1,160 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#include "bacnet/basic/object/device.h"
+#include "bacnet/basic/service/h_apdu.h"
+#include "bacnet/basic/binding/address.h"
+#include "bacnet/bacdef.h"
+#include "bacnet/basic/services.h"
+
+static void Init_Service_Handlers(void)
+{
+    Device_Init(NULL);
+    apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_WHO_IS, handler_who_is);
+    apdu_set_unrecognized_service_handler_handler(handler_unrecognized_service);
+    apdu_set_confirmed_handler(
+        SERVICE_CONFIRMED_READ_PROPERTY, handler_read_property);
+    apdu_set_unconfirmed_handler(SERVICE_UNCONFIRMED_I_AM, handler_i_am_add);
+}
+
+int main(int argc, char *argv[])
+{
+    address_init();
+    Device_Set_Object_Instance_Number(BACNET_MAX_INSTANCE);
+    Init_Service_Handlers();
+
+    return 0;
+}
+`
+
+id "bacnet-stack/bacnet-stack"
+
+fromVer "bacnet-stack-1.0.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	osName := target.require["os"][0]
+	if osName != "linux" && osName != "darwin" && osName != "windows" {
+		return false
+	}
+
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	// The 1.0.0 Conan patch adds this destination for Windows DLLs. Later
+	// tags already contain it, so apply the same source-backed change only
+	// when the selected source still has the older install rule.
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	source := string(os.readFile(cmakeLists)!)
+	if !strings.contains(source, `RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}`) {
+		source = strings.replace(
+			source,
+			`  EXPORT ${PROJECT_NAME}Targets
+`,
+			`  EXPORT ${PROJECT_NAME}Targets
+  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+`,
+			1,
+		)
+		os.writeFile(cmakeLists, []byte(source), 0o644)!
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BACNET_STACK_BUILD_APPS", false
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licensePath := filepath.join(ctx.SourceDir, "license", "gpl-2.txt")
+	if _, err := os.stat(licensePath); err != nil {
+		if !os.isNotExist(err) {
+			panic err
+		}
+		licensePath = filepath.join(ctx.SourceDir, "license", "GPL-2.0")
+	}
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "GPL-2.0"), os.readFile(licensePath)!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lbacnet-stack"]
+	if osName == "linux" {
+		libs <- "-lm", "-lpthread"
+	} else if osName == "windows" {
+		libs <- "-lwsock32", "-lwinmm", "-lws2_32", "-liphlpapi"
+	}
+
+	cflags := ["-I$${includedir}"]
+	if !shared {
+		cflags <- "-DBACNET_STACK_STATIC_DEFINE"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "bacnet-stack",
+		description = "BACnet Protocol Stack library",
+		version = "bacnet-stack-1.0.0",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "bacnet-stack.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("bacnet-stack")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "bacnet-stack.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("bacnet-stack")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		if target.require["os"][0] == "windows" {
+			path := os.getenv("PATH")
+			os.setenv("PATH", filepath.join(installDir, "bin")+";"+path)!
+		} else {
+			os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+			os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		}
+	}
+	exec! binary
+}
