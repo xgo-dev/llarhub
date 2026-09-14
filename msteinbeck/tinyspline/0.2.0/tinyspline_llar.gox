@@ -1,0 +1,311 @@
+import (
+	"os"
+	"strings"
+	"path/filepath"
+	"slices"
+)
+
+const consumerC = `#include <tinyspline.h>
+
+int main() {
+  tsBSpline spline;
+  tsError status = ts_bspline_new(6, 3, 3, TS_OPENED, &spline);
+  ts_bspline_free(&spline);
+  return status == TS_SUCCESS ? 0 : 1;
+}
+`
+
+const consumerCXX = `#include <tinysplinecpp.h>
+
+int main() {
+  tinyspline::BSpline spline(6, 3, 3);
+  return 0;
+}
+`
+
+var sourcePatch = `--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -9,7 +9,10 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+@@LLAR_CONTEXT@@add_subdirectory(src)
+@@LLAR_CONTEXT@@add_definitions("$${TINYSPLINE_DEFINITIONS}")
+@@LLAR_BLANK@@
+-add_subdirectory(examples)
+-add_subdirectory(test)
+-add_subdirectory(docs)
+-add_subdirectory(tools)
++if(TINYSPLINE_BUILD_EXAMPLES)
++	add_subdirectory(examples)
++endif()
++if(TINYSPLINE_BUILD_TESTS)
++	enable_testing()
++	add_subdirectory(test)
++endif()
++if(TINYSPLINE_BUILD_DOCS)
++	add_subdirectory(docs)
++endif()
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -324,14 +324,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARIES "$${TINYSPLINE_LIBRARIES} -lm")
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@	# TINYSPLINE_LIBRARY_C_FLAGS
+-	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Werror")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Wall")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Wextra")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Wfloat-equal")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -pedantic")
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@	# TINYSPLINE_LIBRARY_CXX_FLAGS@@LLAR_TRAILING@@
+-	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Werror")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Wall")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Wextra")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Wfloat-equal")
+@@ -358,14 +356,12 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARIES "$${TINYSPLINE_LIBRARIES} -lm")
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@	# TINYSPLINE_LIBRARY_C_FLAGS
+-	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Werror")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Wall")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Wextra")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -Wfloat-equal")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} -pedantic")
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@	# TINYSPLINE_LIBRARY_CXX_FLAGS@@LLAR_TRAILING@@
+-	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Werror")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Wall")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Wextra")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} -Wfloat-equal")
+@@ -386,11 +382,9 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@	# TINYSPLINE_LIBRARY_C_FLAGS
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} /Wall")
+-	set(TINYSPLINE_LIBRARY_C_FLAGS "$${TINYSPLINE_LIBRARY_C_FLAGS} /WX")
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@	# TINYSPLINE_LIBRARY_CXX_FLAGS
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} /Wall")
+-	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} /WX")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} /wd4514")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} /wd4710")
+@@LLAR_CONTEXT@@	set(TINYSPLINE_LIBRARY_CXX_FLAGS "$${TINYSPLINE_LIBRARY_CXX_FLAGS} /wd4350")
+@@ -467,8 +461,11 @@ list(APPEND TINYSPLINE_CXX_SOURCE_FILES
+@@LLAR_CONTEXT@@set(TINYSPLINE_CXX_SOURCE_FILES $${TINYSPLINE_CXX_SOURCE_FILES} PARENT_SCOPE)
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@# C library
+-if(TARGET_SUPPORTS_SHARED_LIBS)
++if(BUILD_SHARED_LIBS)
+@@LLAR_CONTEXT@@	add_library(tinyspline_shared SHARED $${TINYSPLINE_C_SOURCE_FILES})
++	if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++		target_link_libraries(tinyspline_shared PRIVATE m)
++	endif()
+@@LLAR_CONTEXT@@	set_target_properties(tinyspline_shared PROPERTIES
+@@LLAR_CONTEXT@@		OUTPUT_NAME "tinyspline"
+@@LLAR_CONTEXT@@		DEBUG_POSTFIX "$${TINYSPLINE_DEBUG_POSTFIX}"
+@@ -479,7 +476,7 @@ if(TARGET_SUPPORTS_SHARED_LIBS)
+@@LLAR_CONTEXT@@		ARCHIVE DESTINATION lib
+@@LLAR_CONTEXT@@		RUNTIME DESTINATION bin
+@@LLAR_CONTEXT@@	)
+-endif()
++else()
+@@LLAR_CONTEXT@@add_library(tinyspline_static STATIC $${TINYSPLINE_C_SOURCE_FILES})
+@@LLAR_CONTEXT@@set_target_properties(tinyspline_static PROPERTIES
+@@LLAR_CONTEXT@@	OUTPUT_NAME "tinyspline"
+@@ -491,16 +488,17 @@ install(TARGETS tinyspline_static
+@@LLAR_CONTEXT@@	LIBRARY DESTINATION lib
+@@LLAR_CONTEXT@@	ARCHIVE DESTINATION lib
+@@LLAR_CONTEXT@@)
+-install(FILES tinyspline.h
+-	DESTINATION include
+-)
+@@LLAR_CONTEXT@@target_include_directories(tinyspline_static
+@@LLAR_CONTEXT@@	PUBLIC $${CMAKE_CURRENT_SOURCE_DIR}
+@@LLAR_CONTEXT@@)
++endif()
++install(FILES tinyspline.h
++	DESTINATION include
++)
+@@LLAR_BLANK@@
+@@LLAR_CONTEXT@@# C++ library
+@@LLAR_CONTEXT@@if(NOT TINYSPLINE_DISABLE_CXX AND TINYSPLINE_CXX_AVAILABLE)
+-	if(TARGET_SUPPORTS_SHARED_LIBS)
++	if(BUILD_SHARED_LIBS)
+@@LLAR_CONTEXT@@		add_library(tinysplinecpp_shared SHARED $${TINYSPLINE_CXX_SOURCE_FILES})
+@@LLAR_CONTEXT@@		set_target_properties(tinysplinecpp_shared PROPERTIES
+@@LLAR_CONTEXT@@			OUTPUT_NAME "tinysplinecpp"
+@@ -512,7 +510,7 @@ if(NOT TINYSPLINE_DISABLE_CXX AND TINYSPLINE_CXX_AVAILABLE)
+@@LLAR_CONTEXT@@			ARCHIVE DESTINATION lib
+@@LLAR_CONTEXT@@			RUNTIME DESTINATION bin
+@@LLAR_CONTEXT@@		)
+-	endif()
++	else()
+@@LLAR_CONTEXT@@	add_library(tinysplinecpp_static STATIC $${TINYSPLINE_CXX_SOURCE_FILES})
+@@LLAR_CONTEXT@@	set_target_properties(tinysplinecpp_static PROPERTIES
+@@LLAR_CONTEXT@@		OUTPUT_NAME "tinysplinecpp"
+@@ -524,12 +522,13 @@ if(NOT TINYSPLINE_DISABLE_CXX AND TINYSPLINE_CXX_AVAILABLE)
+@@LLAR_CONTEXT@@		LIBRARY DESTINATION lib
+@@LLAR_CONTEXT@@		ARCHIVE DESTINATION lib
+@@LLAR_CONTEXT@@	)
+-	install(FILES tinysplinecpp.h
+-		DESTINATION include
+-	)
+@@LLAR_CONTEXT@@	target_include_directories(tinysplinecpp_static
+@@LLAR_CONTEXT@@		PUBLIC $${CMAKE_CURRENT_SOURCE_DIR}
+@@LLAR_CONTEXT@@	)
++	endif()
++	install(FILES tinysplinecpp.h
++		DESTINATION include
++	)
+@@LLAR_CONTEXT@@endif()
+@@LLAR_BLANK@@
+@@LLAR_BLANK@@
+`
+
+id "msteinbeck/tinyspline"
+
+fromVer "0.2.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"cxx": "ON",
+	"floating_point_precision": "double",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "cxx" && name != "floating_point_precision" {
+			return false
+		}
+		for value in values {
+			if name == "floating_point_precision" {
+				if value != "double" && value != "single" {
+					return false
+				}
+			} else if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	cxx := target.options["cxx"][0] == "ON"
+	singlePrecision := target.options["floating_point_precision"][0] == "single"
+
+	patchFile := filepath.join(ctx.SourceDir, "_llar.patch")
+	patchContent := strings.replaceAll(sourcePatch, "@@LLAR_CONTEXT@@", " ")
+	patchContent = strings.replaceAll(patchContent, "@@LLAR_BLANK@@", " ")
+	patchContent = strings.replaceAll(patchContent, "@@LLAR_TRAILING@@", " ")
+	os.writeFile(patchFile, []byte(patchContent), 0o644)!
+	git! "apply", "--unidiff-zero", patchFile
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "TINYSPLINE_FLOAT_PRECISION", singlePrecision
+	c.defineBool "TINYSPLINE_DISABLE_CXX", !cxx
+	c.defineBool "TINYSPLINE_DISABLE_CSHARP", true
+	c.defineBool "TINYSPLINE_DISABLE_D", true
+	c.defineBool "TINYSPLINE_DISABLE_GOLANG", true
+	c.defineBool "TINYSPLINE_DISABLE_JAVA", true
+	c.defineBool "TINYSPLINE_DISABLE_LUA", true
+	c.defineBool "TINYSPLINE_DISABLE_OCTAVE", true
+	c.defineBool "TINYSPLINE_DISABLE_PHP", true
+	c.defineBool "TINYSPLINE_DISABLE_PYTHON", true
+	c.defineBool "TINYSPLINE_DISABLE_R", true
+ c.defineBool "TINYSPLINE_DISABLE_RUBY", true
+ c.defineBool "TINYSPLINE_BUILD_EXAMPLES", false
+ c.defineBool "TINYSPLINE_BUILD_TESTS", false
+ c.defineBool "TINYSPLINE_BUILD_DOCS", false
+ c.configure
+ c.build
+ c.install
+
+ licenseDir := filepath.join(installDir, "licenses")
+ os.mkdirAll(licenseDir, 0o755)!
+ os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+ linuxOrFreeBSD := slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd")
+ cLibs := ["-L$${libdir}", "-ltinyspline"]
+ if linuxOrFreeBSD {
+  cLibs <- "-lm"
+ }
+ cFlags := ["-I$${includedir}"]
+ cxxFlags := ["-I$${includedir}"]
+
+ pcDir := filepath.join(installDir, "lib", "pkgconfig")
+ os.mkdirAll(pcDir, 0o755)!
+ cPC := pkgconfig.new(
+  name = "tinyspline",
+  description = "NURBS Library for a Multitude of Programming Languages",
+  version = "0.2.0",
+  libs = cLibs,
+  cflags = cFlags,
+ )!
+ cOut := os.create(filepath.join(pcDir, "tinyspline.pc"))!
+ cPC.writeTo(cOut)!
+ cOut.close()!
+
+ if cxx {
+  cxxLibs := ["-L$${libdir}", "-ltinysplinecpp"]
+  if linuxOrFreeBSD {
+   cxxLibs <- "-lm"
+  }
+  cxxPC := pkgconfig.new(
+   name = "tinysplinecpp",
+   description = "TinySpline C++ wrapper",
+   version = "0.2.0",
+   libs = cxxLibs,
+   cflags = cxxFlags,
+ )!
+ cxxOut := os.create(filepath.join(pcDir, "tinysplinecpp.pc"))!
+ cxxPC.writeTo(cxxOut)!
+ cxxOut.close()!
+ }
+
+ pkgconfig.use installDir
+ lookupName := "tinyspline"
+ if cxx {
+  lookupName = "tinysplinecpp"
+ }
+ ctx.setMetadata pkgconfig.lookup(lookupName)!
+}
+
+onTest ctx => {
+ installDir := ctx.outputDir
+ testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+ os.mkdirAll(testDir, 0o755)!
+
+ cPath := filepath.join(testDir, "consumer.c")
+ os.writeFile(cPath, []byte(consumerC), 0o644)!
+ pkgconfig.use installDir
+ cFlags := pkgconfig.lookup("tinyspline")!
+ cFlagsPath := filepath.join(testDir, "tinyspline.flags")
+ os.writeFile(cFlagsPath, []byte(cFlags), 0o644)!
+ cBinary := filepath.join(testDir, "consumer-c")
+ cc! cPath, "-o", cBinary, "@"+cFlagsPath
+
+ if target.options["cxx"][0] == "ON" {
+  cxxPath := filepath.join(testDir, "consumer.cpp")
+  os.writeFile(cxxPath, []byte(consumerCXX), 0o644)!
+  cxxFlags := pkgconfig.lookup("tinysplinecpp")!
+  cxxFlagsPath := filepath.join(testDir, "tinysplinecpp.flags")
+  os.writeFile(cxxFlagsPath, []byte(cxxFlags), 0o644)!
+  cxxBinary := filepath.join(testDir, "consumer-cxx")
+  exec! "c++", "-std=c++11", cxxPath, "-o", cxxBinary, "@"+cxxFlagsPath
+  if target.options["shared"][0] == "ON" {
+   os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+   os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+  }
+  exec! cxxBinary
+ }
+ if target.options["shared"][0] == "ON" {
+  os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+  os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+ }
+ exec! cBinary
+}

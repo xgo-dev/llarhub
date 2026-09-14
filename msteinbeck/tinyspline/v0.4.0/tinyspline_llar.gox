@@ -1,0 +1,176 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerC = `#include <tinyspline.h>
+
+int main() {
+  tsBSpline spline;
+  tsStatus status;
+  tsError error = ts_bspline_new(6, 3, 3, TS_OPENED, &spline, &status);
+  ts_bspline_free(&spline);
+  return error == TS_SUCCESS ? 0 : 1;
+}
+`
+
+const consumerCXX = `#include <tinysplinecxx.h>
+
+int main() {
+  tinyspline::BSpline spline(6, 3, 3);
+  return 0;
+}
+`
+
+
+id "msteinbeck/tinyspline"
+
+fromVer "v0.4.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"cxx": "ON",
+	"floating_point_precision": "double",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "cxx" && name != "floating_point_precision" {
+			return false
+		}
+		for value in values {
+			if name == "floating_point_precision" {
+				if value != "double" && value != "single" {
+					return false
+				}
+			} else if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	cxx := target.options["cxx"][0] == "ON"
+	singlePrecision := target.options["floating_point_precision"][0] == "single"
+
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "TINYSPLINE_INSTALL_BINARY_DIR", "bin"
+	c.define "TINYSPLINE_INSTALL_LIBRARY_DIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "TINYSPLINE_FLOAT_PRECISION", singlePrecision
+	c.defineBool "TINYSPLINE_WARNINGS_AS_ERRORS", false
+	c.defineBool "TINYSPLINE_ENABLE_CXX", cxx
+	c.defineBool "TINYSPLINE_ENABLE_CSHARP", false
+	c.defineBool "TINYSPLINE_ENABLE_DLANG", false
+	c.defineBool "TINYSPLINE_ENABLE_GO", false
+	c.defineBool "TINYSPLINE_ENABLE_JAVA", false
+	c.defineBool "TINYSPLINE_ENABLE_LUA", false
+	c.defineBool "TINYSPLINE_ENABLE_OCTAVE", false
+	c.defineBool "TINYSPLINE_ENABLE_PHP", false
+	c.defineBool "TINYSPLINE_ENABLE_PYTHON", false
+	c.defineBool "TINYSPLINE_ENABLE_R", false
+	c.defineBool "TINYSPLINE_ENABLE_RUBY", false
+	c.defineBool "TINYSPLINE_ENABLE_ALL_INTERFACES", false
+	c.defineBool "TINYSPLINE_BUILD_DOCS", false
+	c.defineBool "TINYSPLINE_BUILD_EXAMPLES", false
+	c.defineBool "TINYSPLINE_BUILD_TESTS", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	linuxOrFreeBSD := slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd")
+	cLibs := ["-L$${libdir}", "-ltinyspline"]
+	cxxLibs := ["-L$${libdir}", "-ltinysplinecxx"]
+	if linuxOrFreeBSD {
+		cLibs <- "-lm"
+		cxxLibs <- "-lm"
+	}
+
+	cFlags := ["-I$${includedir}"]
+	cxxFlags := ["-I$${includedir}"]
+	if shared && slices.contains(target.require["os"], "windows") {
+		cFlags <- "-DTINYSPLINE_SHARED"
+		cxxFlags <- "-DTINYSPLINE_SHARED"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	cPC := pkgconfig.new(
+		name = "tinyspline",
+		description = "Spline Library for a Multitude of Programming Languages",
+		version = "v0.4.0",
+		libs = cLibs,
+		cflags = cFlags,
+	)!
+	cOut := os.create(filepath.join(pcDir, "tinyspline.pc"))!
+	cPC.writeTo(cOut)!
+	cOut.close()!
+
+	if cxx {
+		cxxPC := pkgconfig.new(
+			name = "tinysplinecxx",
+			description = "TinySpline C++ wrapper",
+			version = "v0.4.0",
+			libs = cxxLibs,
+			cflags = cxxFlags,
+		)!
+		cxxOut := os.create(filepath.join(pcDir, "tinysplinecxx.pc"))!
+		cxxPC.writeTo(cxxOut)!
+		cxxOut.close()!
+	}
+
+	pkgconfig.use installDir
+	lookupName := "tinyspline"
+	if cxx {
+		lookupName = "tinysplinecxx"
+	}
+	ctx.setMetadata pkgconfig.lookup(lookupName)!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	cPath := filepath.join(testDir, "consumer.c")
+	os.writeFile(cPath, []byte(consumerC), 0o644)!
+	pkgconfig.use installDir
+	cFlags := pkgconfig.lookup("tinyspline")!
+	cFlagsPath := filepath.join(testDir, "tinyspline.flags")
+	os.writeFile(cFlagsPath, []byte(cFlags), 0o644)!
+	cBinary := filepath.join(testDir, "consumer-c")
+	cc! "-DTINYSPLINE_API_0_3", cPath, "-o", cBinary, "@"+cFlagsPath
+
+	if target.options["cxx"][0] == "ON" {
+		cxxPath := filepath.join(testDir, "consumer.cpp")
+		os.writeFile(cxxPath, []byte(consumerCXX), 0o644)!
+		cxxFlags := pkgconfig.lookup("tinysplinecxx")!
+		cxxFlagsPath := filepath.join(testDir, "tinysplinecxx.flags")
+		os.writeFile(cxxFlagsPath, []byte(cxxFlags), 0o644)!
+		cxxBinary := filepath.join(testDir, "consumer-cxx")
+		exec! "c++", "-std=c++11", cxxPath, "-o", cxxBinary, "@"+cxxFlagsPath
+		if target.options["shared"][0] == "ON" {
+			os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+			os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		}
+		exec! cxxBinary
+	}
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! cBinary
+}
