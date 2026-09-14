@@ -1,0 +1,97 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `
+#include "Highs.h"
+
+int main() {
+	HighsModel model;
+	model.lp_.num_col_ = 2;
+	model.lp_.num_row_ = 3;
+	model.lp_.sense_ = ObjSense::kMinimize;
+	model.lp_.offset_ = 3;
+	model.lp_.col_cost_ = {1.0, 1.0};
+	model.lp_.col_lower_ = {0.0, 1.0};
+	model.lp_.col_upper_ = {4.0, 1.0e30};
+	model.lp_.row_lower_ = {-1.0e30, 5.0, 6.0};
+	model.lp_.row_upper_ = {7.0, 15.0, 1.0e30};
+	model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
+	model.lp_.a_matrix_.start_ = {0, 2, 5};
+	model.lp_.a_matrix_.index_ = {1, 2, 0, 1, 2};
+	model.lp_.a_matrix_.value_ = {1.0, 3.0, 1.0, 2.0, 2.0};
+
+	Highs highs;
+	if (highs.passModel(model) != HighsStatus::kOk) return 1;
+	if (highs.run() != HighsStatus::kOk) return 1;
+	return highs.getModelStatus() == HighsModelStatus::kOptimal ? 0 : 1;
+}
+`
+
+id "ERGO-Code/HiGHS"
+
+// Conan Center's earliest supported HiGHS tag is v1.7.2. Through v1.15.1,
+// the source keeps this CMake build, install, and public C++ interface.
+fromVer "v1.7.2"
+
+onRequire (proj, deps) => {
+	// HiGHS finds zlib when ZLIB is enabled. Conan's >=1.2.11 <2 range is
+	// satisfied by the latest version from its selected recipe snapshot.
+	deps.require "madler/zlib", "v1.3.1"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_TESTING", false
+	c.defineBool "BUILD_SHARED_LIBS", false
+	for dep in ctx.Proj.Deps {
+		c.use ctx.outputDir(dep)
+	}
+	c.configure
+	c.build
+	c.install
+
+	// Upstream's highs.pc records no static dependency closure (it carries a
+	// TODO for that case). Publish a relocatable file whose full lookup includes
+	// the required zlib Formula metadata instead.
+	pc := pkgconfig.new(
+		name = "highs",
+		description = "Linear Optimization Software",
+		version = "v1.7.2",
+		requires = ["zlib"],
+		libs = ["-L$${libdir}", "-lhighs"],
+		cflags = ["-I$${includedir}/highs"],
+	)!
+	pcFile := os.create(filepath.join(installDir, "lib", "pkgconfig", "highs.pc"))!
+	pc.writeTo(pcFile)!
+	pcFile.close()!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("highs")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "highs.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("highs")!), 0o644)!
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
