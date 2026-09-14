@@ -1,0 +1,85 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
+
+#include "wyhash.h"
+
+int main(void) {
+    uint64_t _wyp[4];
+    make_secret(time(NULL), _wyp);
+    char s[] = "fcdskhfjs";
+    uint64_t h = wyhash(s, sizeof(s) / sizeof(s[0]), 0, _wyp);
+
+    return 0;
+}
+`
+
+id "wangyi-fudan/wyhash"
+
+// V3, version_1, wyhash_v4, wyhash_v5, wyhash_alpha, and wyhash_final do not
+// form a continuous compatible range: wyhash_final's make_secret writes five
+// words into the four-word Conan consumer buffer. wyhash is the first tag in
+// the continuous range that passes the consumer at runtime.
+fromVer "wyhash"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+
+	filepath.walkDir(ctx.SourceDir, (sourcePath, entry, err) => {
+		if err != nil {
+			return err
+		}
+		if entry.isDir || !entry.name.hasSuffix(".h") {
+			return nil
+		}
+
+		relativePath := filepath.rel(ctx.SourceDir, sourcePath)!
+		destination := filepath.join(includeDir, relativePath)
+		os.mkdirAll(filepath.dir(destination), 0o755)!
+		os.writeFile(destination, os.readFile(sourcePath)!, 0o644)!
+		return nil
+	})!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "wyhash",
+		description = "The FASTEST QUALITY hash function, random number generators (PRNG) and hash map.",
+		version = "wyhash",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "wyhash.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("wyhash")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "wyhash.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("wyhash")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}

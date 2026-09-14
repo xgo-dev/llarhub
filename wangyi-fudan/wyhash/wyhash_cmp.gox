@@ -1,0 +1,28 @@
+// The complete upstream tag set is ordered by its verified commit chronology,
+// not by tag spelling: version_1, V3, wyhash_v4, wyhash_v5, wyhash_alpha,
+// wyhash_final, wyhash, wyhash_final4.
+func tagOrder(version string) int {
+	switch version {
+	case "version_1":
+		return 0
+	case "V3":
+		return 1
+	case "wyhash_v4":
+		return 2
+	case "wyhash_v5":
+		return 3
+	case "wyhash_alpha":
+		return 4
+	case "wyhash_final":
+		return 5
+	case "wyhash":
+		return 6
+	case "wyhash_final4":
+		return 7
+	}
+	return -1
+}
+
+compareVer (a, b) => {
+	return tagOrder(a.Version) - tagOrder(b.Version)
+}
