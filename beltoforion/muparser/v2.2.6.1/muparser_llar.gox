@@ -1,0 +1,144 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <iostream>
+
+#include "muParser.h"
+
+// Function callback
+double MySqr(double a_fVal)
+{
+  return a_fVal*a_fVal;
+}
+
+// main program
+int main(int argc, char* argv[])
+{
+  using namespace mu;
+
+  try
+  {
+    double fVal = 1;
+    Parser p;
+    p.DefineVar("a", &fVal);
+    p.DefineFun("MySqr", MySqr);
+    p.SetExpr("MySqr(a)*_pi+min(10,a)");
+
+    for (std::size_t a=0; a<100; ++a)
+    {
+      fVal = a;  // Change value of variable a
+      std::cout << p.Eval() << std::endl;
+    }
+  }
+  catch (Parser::exception_type &e)
+  {
+    std::cout << e.GetMsg() << std::endl;
+  }
+  return 0;
+}
+`
+
+id "beltoforion/muparser"
+
+fromVer "v2.2.6.1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"with_openmp": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "with_openmp" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	withOpenMP := target.options["with_openmp"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "ENABLE_SAMPLES", false
+	c.defineBool "ENABLE_OPENMP", withOpenMP
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	licenseFile := "LICENSE"
+	licensePath := filepath.join(ctx.SourceDir, licenseFile)
+	if _, err := os.stat(licensePath); err != nil {
+		if !os.isNotExist(err) {
+			panic err
+		}
+		licenseFile = "License.txt"
+		licensePath = filepath.join(ctx.SourceDir, licenseFile)
+	}
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, licenseFile), os.readFile(licensePath)!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lmuparser"]
+	if !shared && (slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "freebsd")) {
+		libs <- "-lm"
+	}
+	cflags := ["-I$${includedir}"]
+	if !shared {
+		cflags <- "-DMUPARSER_STATIC=1"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "muparser",
+		description = "Mathematical expressions parser library",
+		version = "v2.2.6.1",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "muparser.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("muparser")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "muparser.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("muparser")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
