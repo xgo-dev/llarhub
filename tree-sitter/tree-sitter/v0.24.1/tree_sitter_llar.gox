@@ -1,0 +1,189 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <stdlib.h>
+#include <tree_sitter/api.h>
+
+static void *xmalloc(size_t size) {
+    return malloc(size);
+}
+
+static void *xcalloc(size_t count, size_t size) {
+    return calloc(count, size);
+}
+
+static void *xrealloc(void *ptr, size_t size) {
+    return realloc(ptr, size);
+}
+
+static void xfree(void *ptr) {
+    free(ptr);
+}
+
+int main(void) {
+    if (TREE_SITTER_LANGUAGE_VERSION < TREE_SITTER_MIN_COMPATIBLE_LANGUAGE_VERSION) {
+        return 1;
+    }
+
+    ts_set_allocator(xmalloc, xcalloc, xrealloc, xfree);
+
+    TSParser *parser = ts_parser_new();
+    if (!parser) {
+        return 2;
+    }
+    if (ts_parser_language(parser) != NULL) {
+        ts_parser_delete(parser);
+        return 3;
+    }
+    if (!ts_parser_set_language(parser, NULL) || ts_parser_language(parser) != NULL) {
+        ts_parser_delete(parser);
+        return 4;
+    }
+
+    TSLogger logger = {NULL, NULL};
+    ts_parser_set_logger(parser, logger);
+    ts_parser_print_dot_graphs(parser, -1);
+    ts_parser_reset(parser);
+
+    TSRange range = {{0, 0}, {0, 0}, 0, 0};
+    if (!ts_parser_set_included_ranges(parser, &range, 1)) {
+        ts_parser_delete(parser);
+        return 5;
+    }
+    uint32_t rangeCount = 0;
+    const TSRange *ranges = ts_parser_included_ranges(parser, &rangeCount);
+    if (rangeCount != 1 || ranges == NULL) {
+        ts_parser_delete(parser);
+        return 6;
+    }
+
+    const char source[] = "int x;";
+    TSTree *tree = ts_parser_parse_string(parser, NULL, source, sizeof(source) - 1);
+    if (tree != NULL) {
+        ts_tree_delete(tree);
+        ts_parser_delete(parser);
+        return 7;
+    }
+
+    uint32_t errorOffset = 0;
+    TSQueryError errorType = TSQueryErrorNone;
+    TSQuery *query = ts_query_new(NULL, "(identifier)", 12, &errorOffset, &errorType);
+    if (query != NULL || errorType != TSQueryErrorLanguage) {
+        ts_query_delete(query);
+        ts_parser_delete(parser);
+        return 8;
+    }
+
+    TSQueryCursor *cursor = ts_query_cursor_new();
+    if (!cursor) {
+        ts_parser_delete(parser);
+        return 9;
+    }
+    ts_query_cursor_set_match_limit(cursor, 32);
+    if (ts_query_cursor_match_limit(cursor) != 32) {
+        ts_query_cursor_delete(cursor);
+        ts_parser_delete(parser);
+        return 10;
+    }
+    ts_query_cursor_set_max_start_depth(cursor, 4);
+    ts_query_cursor_set_byte_range(cursor, 0, 4);
+    ts_query_cursor_set_point_range(cursor, (TSPoint){0, 0}, (TSPoint){0, 4});
+    ts_query_cursor_delete(cursor);
+
+    TSNode node = {0};
+    if (!ts_node_is_null(node)) {
+        ts_parser_delete(parser);
+        return 11;
+    }
+
+    ts_parser_delete(parser);
+    return 0;
+}
+`
+
+id "tree-sitter/tree-sitter"
+
+// Upstream CMake begins at v0.24.1 (lib/CMakeLists.txt). 0.26+ moved that
+// file to the source root; locate it from the selected tree.
+fromVer "v0.24.1"
+
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+
+	cmakeSrc := ctx.SourceDir
+	if _, err := os.stat(filepath.join(ctx.SourceDir, "lib", "CMakeLists.txt")); err == nil {
+		cmakeSrc = filepath.join(ctx.SourceDir, "lib")
+	}
+
+	c := cmake.new(cmakeSrc, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "tree-sitter",
+		description = "An incremental parsing system for programming tools",
+		version = "v0.24.1",
+		URL = "https://tree-sitter.github.io/tree-sitter/",
+		libs = ["-L$${libdir}", "-ltree-sitter"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "tree-sitter.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("tree-sitter")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "tree-sitter.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("tree-sitter")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv! "LD_LIBRARY_PATH", filepath.join(installDir, "lib")
+		os.setenv! "DYLD_LIBRARY_PATH", filepath.join(installDir, "lib")
+	}
+	exec! binary
+}
