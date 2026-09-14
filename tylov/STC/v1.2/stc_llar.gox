@@ -1,0 +1,66 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <stdlib.h>
+
+#include <stc/cvec.h>
+
+using_cvec(i, int);
+
+int main(void) {
+    cvec_i vec = cvec_i_init();
+    cvec_i_push_back(&vec, 10);
+    cvec_i_push_back(&vec, 20);
+    cvec_i_del(&vec);
+    return EXIT_SUCCESS;
+}
+`
+
+id "tylov/STC"
+
+fromVer "v1.2"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	includeDir := filepath.join(installDir, "include")
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(includeDir, 0o755)!
+	os.mkdirAll(licenseDir, 0o755)!
+	for entry in filepath.glob(filepath.join(ctx.SourceDir, "include", "*"))! {
+		cp! "-R", entry, includeDir
+	}
+	cp! filepath.join(ctx.SourceDir, "LICENSE"), filepath.join(licenseDir, "LICENSE")
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "stc",
+		description = "STC - Smart Template Containers",
+		version = "v1.2",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "stc.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("stc")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "stc.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("stc")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
