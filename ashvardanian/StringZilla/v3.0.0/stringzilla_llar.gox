@@ -1,0 +1,83 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <cstdlib>
+#include <stringzilla/stringzilla.h>
+
+int main(void) {
+  char const text[] = "some string";
+  return sz_equal(text, text, sizeof(text) - 1) ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+`
+
+id "ashvardanian/StringZilla"
+
+fromVer "v3.0.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	sourceDir := filepath.join(ctx.SourceDir, "include")
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+
+	walkErr := filepath.walkDir(sourceDir, (sourcePath, entry, err) => {
+		if err != nil {
+			return err
+		}
+		if entry.isDir || (!entry.name.hasSuffix(".h") && !entry.name.hasSuffix(".hpp")) {
+			return nil
+		}
+
+		relativePath := filepath.rel(sourceDir, sourcePath)!
+		destination := filepath.join(includeDir, relativePath)
+		os.mkdirAll(filepath.dir(destination), 0o755)!
+		os.writeFile(destination, os.readFile(sourcePath)!, 0o644)!
+		return nil
+	})
+	if walkErr != nil {
+		panic walkErr
+	}
+
+	licensePath := filepath.join(ctx.SourceDir, "LICENSE")
+	if _, err := os.stat(licensePath); err == nil {
+		licenseDir := filepath.join(installDir, "licenses")
+		os.mkdirAll(licenseDir, 0o755)!
+		os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(licensePath)!, 0o644)!
+	} else if !os.isNotExist(err) {
+		panic err
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "stringzilla",
+		description = "Fastest string sort, search, split, and shuffle for long strings and multi-gigabyte files",
+		version = "v3.0.0",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "stringzilla.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("stringzilla")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "stringzilla.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("stringzilla")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}

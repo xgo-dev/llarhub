@@ -1,0 +1,99 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <cstdlib>
+#include <iostream>
+#include <stringzilla.h>
+
+int main(void) {
+  strzl_haystack_t haystack = {
+    "Fastest string sort, search, split, "
+    "and shuffle for long strings and multi-gigabyte files in Python and C, "
+    "leveraging SIMD with Arm Neon and x86 AVX2 & AVX-512 intrinsics.",
+    171};
+  strzl_needle_t needle = {"SIMD", 4};
+
+  // Count occurrences of a character like a boss 😎
+  size_t count = strzl_naive_count_char(haystack, 'a');
+
+  // Find a character like you're searching for treasure 🏴‍☠️
+  size_t position = strzl_naive_find_char(haystack, 'a');
+
+  // Find a substring like it's Waldo 🕵️‍♂️
+  size_t substring_position = strzl_naive_find_substr(haystack, needle);
+
+  return EXIT_SUCCESS;
+}
+`
+
+id "ashvardanian/StringZilla"
+
+fromVer "v1.0.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	sourceDir := filepath.join(ctx.SourceDir, "stringzilla")
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+
+	walkErr := filepath.walkDir(sourceDir, (sourcePath, entry, err) => {
+		if err != nil {
+			return err
+		}
+		if entry.isDir || !entry.name.hasSuffix(".h") {
+			return nil
+		}
+
+		relativePath := filepath.rel(sourceDir, sourcePath)!
+		destination := filepath.join(includeDir, relativePath)
+		os.mkdirAll(filepath.dir(destination), 0o755)!
+		os.writeFile(destination, os.readFile(sourcePath)!, 0o644)!
+		return nil
+	})
+	if walkErr != nil {
+		panic walkErr
+	}
+
+	licensePath := filepath.join(ctx.SourceDir, "LICENSE")
+	if _, err := os.stat(licensePath); err == nil {
+		licenseDir := filepath.join(installDir, "licenses")
+		os.mkdirAll(licenseDir, 0o755)!
+		os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(licensePath)!, 0o644)!
+	} else if !os.isNotExist(err) {
+		panic err
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "stringzilla",
+		description = "Fastest string sort, search, split, and shuffle for long strings and multi-gigabyte files",
+		version = "v1.0.0",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "stringzilla.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("stringzilla")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "stringzilla.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("stringzilla")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
