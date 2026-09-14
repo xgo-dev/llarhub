@@ -1,0 +1,12 @@
+import "strings"
+
+func linuxVersion(version string) string {
+    // GNU's '~' sorts before the end of a version: v7.2~rc7 < v7.2.
+    version = strings.ReplaceAll(version, "-rc", "~rc")
+    // Keep v5.12-rc1-dontuse below the normal v5.12-rc1 tag.
+    return strings.ReplaceAll(version, "-dontuse", "~dontuse")
+}
+
+compareVer (a, b) => {
+    return gnu.compare(linuxVersion(a.Version), linuxVersion(b.Version))
+}
