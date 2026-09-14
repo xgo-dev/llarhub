@@ -1,0 +1,264 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerC = `#include <libconfig.h>
+
+#include <stdio.h>
+#include <string.h>
+
+int main(void) {
+    config_t cfg;
+    const char *name;
+    const char *tag;
+    int count;
+    int ok;
+    int open;
+    double price;
+    config_setting_t *tags;
+    config_setting_t *extra;
+
+    config_init(&cfg);
+    config_set_options(&cfg, CONFIG_OPTION_SEMICOLON_SEPARATORS | CONFIG_OPTION_FSYNC);
+    config_set_tab_width(&cfg, 2);
+    config_set_float_precision(&cfg, 6);
+
+    if (!config_read_string(&cfg,
+            "name = \"Books\";\n"
+            "count = 3;\n"
+            "price = 9.5;\n"
+            "ok = true;\n"
+            "tags = [\"a\", \"b\"];\n"
+            "store = { open = 9; close = 18; };\n")) {
+        fprintf(stderr, "%s:%d - %s\n", config_error_file(&cfg),
+            config_error_line(&cfg), config_error_text(&cfg));
+        config_destroy(&cfg);
+        return 1;
+    }
+
+    if (!config_lookup_string(&cfg, "name", &name) || strcmp(name, "Books") != 0) {
+        config_destroy(&cfg);
+        return 2;
+    }
+    if (!config_lookup_int(&cfg, "count", &count) || count != 3) {
+        config_destroy(&cfg);
+        return 3;
+    }
+    if (!config_lookup_float(&cfg, "price", &price) || price != 9.5) {
+        config_destroy(&cfg);
+        return 4;
+    }
+    if (!config_lookup_bool(&cfg, "ok", &ok) || !ok) {
+        config_destroy(&cfg);
+        return 5;
+    }
+    if (!config_lookup_int(&cfg, "store.open", &open) || open != 9) {
+        config_destroy(&cfg);
+        return 6;
+    }
+
+    tags = config_lookup(&cfg, "tags");
+    if (tags == NULL || !config_setting_is_array(tags) || config_setting_length(tags) != 2) {
+        config_destroy(&cfg);
+        return 7;
+    }
+    tag = config_setting_get_string_elem(tags, 0);
+    if (tag == NULL || strcmp(tag, "a") != 0) {
+        config_destroy(&cfg);
+        return 8;
+    }
+
+    extra = config_setting_add(config_root_setting(&cfg), "extra", CONFIG_TYPE_INT);
+    if (extra == NULL || !config_setting_set_int(extra, 42)) {
+        config_destroy(&cfg);
+        return 9;
+    }
+    if (!config_lookup_int(&cfg, "extra", &count) || count != 42) {
+        config_destroy(&cfg);
+        return 10;
+    }
+
+    config_destroy(&cfg);
+    return 0;
+}
+`
+
+const consumerCXX = `#include <libconfig.h++>
+#include <libconfig.hh>
+
+#include <string>
+
+int main() {
+    libconfig::Config cfg;
+    cfg.setOptions(libconfig::Config::OptionFsync
+        | libconfig::Config::OptionSemicolonSeparators
+        | libconfig::Config::OptionColonAssignmentForGroups
+        | libconfig::Config::OptionOpenBraceOnSeparateLine);
+    cfg.readString(
+        "name = \"Books\";\n"
+        "count = 3;\n"
+        "price = 9.5;\n"
+        "ok = true;\n"
+        "tags = [\"a\", \"b\"];\n"
+        "store = { open = 9; close = 18; };\n");
+
+    std::string name = cfg.lookup("name");
+    int count = cfg.lookup("count");
+    double price = cfg.lookup("price");
+    bool ok = cfg.lookup("ok");
+    int open = cfg.lookup("store.open");
+    if (name != "Books" || count != 3 || price != 9.5 || !ok || open != 9) {
+        return 1;
+    }
+
+    const libconfig::Setting &tags = cfg.lookup("tags");
+    if (!tags.isArray() || tags.getLength() != 2) {
+        return 2;
+    }
+    std::string first = tags[0];
+    if (first != "a") {
+        return 3;
+    }
+
+    libconfig::Setting &extra = cfg.getRoot().add("extra", libconfig::Setting::TypeInt);
+    extra = 42;
+    if ((int)cfg.lookup("extra") != 42) {
+        return 4;
+    }
+    return 0;
+}
+`
+
+id "hyperrealm/libconfig"
+
+// v1.7.2 still installs Unix libraries as liblibconfig* and needs a
+// CMake _STDLIB_H workaround; the CMake/pkg-config contract verified here
+// begins at v1.7.3.
+fromVer "v1.7.3"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	windows := slices.contains(target.require["os"], "windows")
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "BUILD_EXAMPLES", false
+	c.defineBool "BUILD_TESTS", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+	os.writeFile(filepath.join(licenseDir, "COPYING.LIB"), os.readFile(filepath.join(ctx.SourceDir, "COPYING.LIB"))!, 0o644)!
+
+	libPrefix := ""
+	if windows {
+		libPrefix = "lib"
+	}
+	cLibs := ["-L$${libdir}", "-l"+libPrefix+"config"]
+	cxxLibs := ["-L$${libdir}", "-l"+libPrefix+"config++"]
+	cCflags := ["-I$${includedir}"]
+	cxxCflags := ["-I$${includedir}"]
+	if !shared {
+		cCflags <- "-DLIBCONFIG_STATIC"
+		cxxCflags <- ["-DLIBCONFIG_STATIC", "-DLIBCONFIGXX_STATIC"]...
+	}
+	if windows {
+		cLibs <- "-lshlwapi"
+		cxxLibs <- "-lshlwapi"
+	}
+	if slices.contains(target.require["os"], "darwin") {
+		cxxLibs <- "-lc++"
+	} else {
+		cxxLibs <- "-lstdc++"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+
+	cPC := pkgconfig.new(
+		name = "libconfig",
+		description = "C Configuration File Library",
+		version = "v1.7.3",
+		libs = cLibs,
+		cflags = cCflags,
+	)!
+	cOut := os.create(filepath.join(pcDir, "libconfig.pc"))!
+	cPC.writeTo(cOut)!
+	cOut.close()!
+
+	cxxPC := pkgconfig.new(
+		name = "libconfig++",
+		description = "C++ Configuration File Library",
+		version = "v1.7.3",
+		libs = cxxLibs,
+		cflags = cxxCflags,
+	)!
+	cxxOut := os.create(filepath.join(pcDir, "libconfig++.pc"))!
+	cxxPC.writeTo(cxxOut)!
+	cxxOut.close()!
+
+	pkgconfig.use installDir
+	pkgconfig.lookup("libconfig++")!
+	ctx.setMetadata pkgconfig.lookup("libconfig")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	cConsumer := filepath.join(testDir, "consumer.c")
+	cxxConsumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(cConsumer, []byte(consumerC), 0o644)!
+	os.writeFile(cxxConsumer, []byte(consumerCXX), 0o644)!
+
+	pkgconfig.use installDir
+	cFlags := filepath.join(testDir, "libconfig.flags")
+	cxxFlags := filepath.join(testDir, "libconfig++.flags")
+	os.writeFile(cFlags, []byte(pkgconfig.lookup("libconfig")!), 0o644)!
+	os.writeFile(cxxFlags, []byte(pkgconfig.lookup("libconfig++")!), 0o644)!
+
+	cBinary := filepath.join(testDir, "consumer")
+	cxxBinary := filepath.join(testDir, "consumer++")
+	cxxAsCBinary := filepath.join(testDir, "consumer++-cc")
+	cc! cConsumer, "-o", cBinary, "@"+cFlags
+	exec! "c++", cxxConsumer, "-o", cxxBinary, "@"+cxxFlags
+	cc! cConsumer, "-o", cxxAsCBinary, "@"+cxxFlags
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! cBinary
+	exec! cxxBinary
+	exec! cxxAsCBinary
+}
