@@ -1,0 +1,98 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "MinHook.h"
+
+int main(void) {
+    MH_Initialize();
+    MH_Uninitialize();
+    return 0;
+}
+`
+
+id "TsudaKageyu/minhook"
+
+fromVer "v1.3.4"
+
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	// Upstream MinHook has separate x64 and x86 libraries. The current LLAR
+	// matrix spellings for those targets are amd64 and 386.
+	arch := target.require["arch"][0]
+	if target.require["os"][0] != "windows" || (arch != "amd64" && arch != "386") {
+		return false
+	}
+	for name, values in target.options {
+		if name != "shared" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+
+	lib := "minhook.x64"
+	if target.require["arch"][0] == "386" {
+		lib = "minhook.x32"
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "minhook",
+		description = "The Minimalistic x86/x64 API Hooking Library for Windows",
+		version = "v1.3.4",
+		libs = ["-L$${libdir}", "-l"+lib],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "minhook.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("minhook")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "minhook.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("minhook")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	exec! binary
+}
