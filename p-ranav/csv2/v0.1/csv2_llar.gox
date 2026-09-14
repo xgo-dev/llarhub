@@ -1,0 +1,139 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <csv2/reader.hpp>
+#include <csv2/writer.hpp>
+
+#include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
+
+int main() {
+    std::string contents = "name,score\nAlice,1\nBob,2\n";
+    csv2::Reader<
+        csv2::delimiter<','>,
+        csv2::quote_character<'"'>,
+        csv2::first_row_is_header<true>,
+        csv2::trim_policy::trim_whitespace> reader;
+
+    if (!reader.parse(contents) || reader.rows() != 3 || reader.cols() != 2) {
+        return 1;
+    }
+
+    std::vector<std::string> header;
+    for (const auto cell : reader.header()) {
+        std::string value;
+        cell.read_value(value);
+        header.push_back(value);
+    }
+    if (header != std::vector<std::string>{"name", "score"}) {
+        return 2;
+    }
+
+    std::vector<std::string> values;
+    for (const auto row : reader) {
+        for (const auto cell : row) {
+            std::string value;
+            cell.read_value(value);
+            values.push_back(value);
+        }
+    }
+    if (values != std::vector<std::string>{"Alice", "1", "Bob", "2"}) {
+        return 3;
+    }
+
+    {
+        std::ofstream input("csv2-reader.csv");
+        if (!input) {
+            return 4;
+        }
+        input << contents;
+    }
+
+    csv2::Reader<
+        csv2::delimiter<','>,
+        csv2::quote_character<'"'>,
+        csv2::first_row_is_header<true>,
+        csv2::trim_policy::trim_whitespace> mapped;
+    if (!mapped.mmap("csv2-reader.csv") || mapped.rows() != 3 || mapped.cols() != 2) {
+        return 5;
+    }
+
+    {
+        std::ofstream stream("csv2-writer.csv");
+        if (!stream) {
+            return 6;
+        }
+        csv2::Writer<csv2::delimiter<','>> writer(stream);
+        writer.write_rows(std::vector<std::vector<std::string>>{
+            {"name", "score"},
+            {"Carol", "3"},
+        });
+    }
+
+    std::ifstream written("csv2-writer.csv");
+    std::string output((std::istreambuf_iterator<char>(written)),
+                       std::istreambuf_iterator<char>());
+    if (output != "name,score\nCarol,3\n") {
+        return 7;
+    }
+    return 0;
+}
+`
+
+id "p-ranav/csv2"
+
+fromVer "v0.1"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	for name in ["LICENSE", "LICENSE.mio"] {
+		os.writeFile(filepath.join(licenseDir, name), os.readFile(filepath.join(ctx.SourceDir, name))!, 0o644)!
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "csv2",
+		description = "Various header libraries mostly future std lib, replacements for(e.g. visit), or some misc",
+		version = "v0.1",
+		URL = "https://github.com/p-ranav/csv2",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "csv2.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("csv2")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "csv2.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("csv2")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", sourcePath, "-o", binary, "@"+flagsFile
+	exec! binary
+}
