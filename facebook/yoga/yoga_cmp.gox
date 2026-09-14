@@ -1,0 +1,21 @@
+// Yoga publishes semantic release tags together with four-component historical
+// date tags. Semver orders the release line, while GNU ordering keeps the date
+// tags distinct below it.
+func releaseVersion(version string) (string, bool) {
+	return version, semver.isValid(version)
+}
+
+compareVer (a, b) => {
+	aVersion, aRelease := releaseVersion(a.Version)
+	bVersion, bRelease := releaseVersion(b.Version)
+	if aRelease && bRelease {
+		return semver.compare(aVersion, bVersion)
+	}
+	if aRelease {
+		return 1
+	}
+	if bRelease {
+		return -1
+	}
+	return gnu.compare(a.Version, b.Version)
+}
