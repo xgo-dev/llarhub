@@ -1,0 +1,229 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <vvenc/vvenc.h>
+#include <vvenc/vvencCfg.h>
+#include <vvenc/version.h>
+
+int main(void) {
+    const char *version = vvenc_get_version();
+    const char *compileInfo = vvenc_get_compile_info_string();
+    const char *simd = vvenc_set_SIMD_extension("");
+    if (version == 0 || version[0] == 0) {
+        fprintf(stderr, "missing version\n");
+        return 1;
+    }
+    if (compileInfo == 0) {
+        fprintf(stderr, "missing compile info\n");
+        return 1;
+    }
+    if (simd == 0) {
+        fprintf(stderr, "missing simd\n");
+        return 1;
+    }
+    if (vvenc_get_error_msg(VVENC_OK) == 0) {
+        fprintf(stderr, "missing error message\n");
+        return 1;
+    }
+    if (vvenc_get_width_of_component(VVENC_CHROMA_420, 64, 0) <= 0) {
+        fprintf(stderr, "invalid luma width\n");
+        return 1;
+    }
+    if (vvenc_get_height_of_component(VVENC_CHROMA_420, 64, 1) <= 0) {
+        fprintf(stderr, "invalid chroma height\n");
+        return 1;
+    }
+    (void)vvenc_is_tracing_enabled();
+
+    vvenc_config cfg;
+    if (vvenc_init_default(&cfg, 64, 64, 30, 0, 32, VVENC_FASTER) != VVENC_OK) {
+        fprintf(stderr, "init_default failed\n");
+        return 1;
+    }
+    cfg.m_verbosity = VVENC_WARNING;
+    cfg.m_numThreads = 1;
+    cfg.m_framesToBeEncoded = 2;
+
+    vvencEncoder *enc = vvenc_encoder_create();
+    if (enc == 0) {
+        fprintf(stderr, "encoder_create failed\n");
+        return 1;
+    }
+    if (vvenc_encoder_open(enc, &cfg) != VVENC_OK) {
+        fprintf(stderr, "encoder_open: %s\n", vvenc_get_last_error(enc));
+        vvenc_encoder_close(enc);
+        return 1;
+    }
+    if (vvenc_get_config(enc, &cfg) != VVENC_OK) {
+        fprintf(stderr, "get_config failed\n");
+        vvenc_encoder_close(enc);
+        return 1;
+    }
+    if (vvenc_get_enc_information(enc) == 0) {
+        fprintf(stderr, "missing encoder information\n");
+        vvenc_encoder_close(enc);
+        return 1;
+    }
+    (void)vvenc_get_num_lead_frames(enc);
+    (void)vvenc_get_num_trail_frames(enc);
+
+    vvencYUVBuffer yuv;
+    vvenc_YUVBuffer_default(&yuv);
+    vvenc_YUVBuffer_alloc_buffer(&yuv, cfg.m_internChromaFormat, cfg.m_SourceWidth, cfg.m_SourceHeight);
+
+    vvencAccessUnit au;
+    vvenc_accessUnit_default(&au);
+    vvenc_accessUnit_alloc_payload(&au, cfg.m_SourceWidth * cfg.m_SourceHeight);
+
+    int produced = 0;
+    bool done = false;
+    for (int frame = 0; frame < 2; frame++) {
+        for (int comp = 0; comp < 3; comp++) {
+            int count = yuv.planes[comp].width * yuv.planes[comp].height;
+            for (int i = 0; i < count; i++) {
+                yuv.planes[comp].ptr[i] = (int16_t)(frame * 8);
+            }
+        }
+        yuv.sequenceNumber = (uint64_t)frame;
+        if (vvenc_encode(enc, &yuv, &au, &done) != VVENC_OK) {
+            fprintf(stderr, "encode: %s\n", vvenc_get_last_error(enc));
+            vvenc_YUVBuffer_free_buffer(&yuv);
+            vvenc_accessUnit_free_payload(&au);
+            vvenc_encoder_close(enc);
+            return 1;
+        }
+        if (au.payloadUsedSize > 0) {
+            produced++;
+        }
+    }
+    while (!done) {
+        if (vvenc_encode(enc, 0, &au, &done) != VVENC_OK) {
+            fprintf(stderr, "flush: %s\n", vvenc_get_last_error(enc));
+            vvenc_YUVBuffer_free_buffer(&yuv);
+            vvenc_accessUnit_free_payload(&au);
+            vvenc_encoder_close(enc);
+            return 1;
+        }
+        if (au.payloadUsedSize > 0) {
+            produced++;
+        }
+    }
+
+    vvenc_print_summary(enc);
+    vvenc_YUVBuffer_free_buffer(&yuv);
+    vvenc_accessUnit_free_payload(&au);
+    if (vvenc_encoder_close(enc) != VVENC_OK) {
+        fprintf(stderr, "encoder_close failed\n");
+        return 1;
+    }
+    if (produced <= 0) {
+        fprintf(stderr, "no access units produced\n");
+        return 1;
+    }
+    printf("%s %d\n", version, produced);
+    return 0;
+}
+`
+
+id "fraunhoferhhi/vvenc"
+
+fromVer "v1.12.0"
+
+defaults {
+	"shared": "OFF",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	osName := target.require["os"][0]
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "VVENC_ENABLE_LINK_TIME_OPT", false
+	if osName == "darwin" {
+		c.define "CMAKE_CXX_FLAGS", "-Wno-deprecated-literal-operator"
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lvvenc"]
+	if osName == "darwin" {
+		libs <- "-lc++"
+	} else {
+		libs <- "-lstdc++"
+	}
+	if slices.contains(target.require["os"], "linux") {
+		libs <- "-lm"
+		libs <- "-lpthread"
+	}
+	cflags := ["-I$${includedir}"]
+	if shared {
+		cflags <- "-DVVENC_DYN_LINK"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "libvvenc",
+		description = "Fraunhofer Versatile Video Encoder (VVenC)",
+		version = "v1.12.0",
+		libs = libs,
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "libvvenc.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libvvenc")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libvvenc.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libvvenc")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
