@@ -1,0 +1,114 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "concurrencpp/concurrencpp.h"
+#include <iostream>
+
+int main() {
+    concurrencpp::runtime runtime;
+    auto result = runtime.thread_executor()->submit([] {
+        std::cout << "hello world" << std::endl;
+    });
+
+    result.get();
+    return 0;
+}
+`
+
+id "David-Haim/concurrencpp"
+
+fromVer "v.0.1.6"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	osValues, osOK := target.require["os"]
+	archValues, archOK := target.require["arch"]
+	if !osOK || osValues.len != 1 || !archOK || archValues.len != 1 {
+		return false
+	}
+	if archValues[0] != "amd64" && archValues[0] != "arm64" {
+		return false
+	}
+	return osValues[0] == "linux" || osValues[0] == "darwin"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	includeDirs := filepath.glob(filepath.join(installDir, "include", "concurrencpp-*"))!
+	includeDir := filepath.base(includeDirs[0])
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.txt"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.txt"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lconcurrencpp"]
+	if target.require["os"][0] == "linux" {
+		libs <- ["-lm", "-lpthread", "-lrt"]...
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "concurrencpp",
+		description = "Modern concurrency for C++",
+		version = "v.0.1.6",
+		libs = libs,
+		cflags = ["-I$${includedir}/" + includeDir],
+	)!
+	out := os.create(filepath.join(pcDir, "concurrencpp.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("concurrencpp")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	testBuild := filepath.join(testDir, "_build")
+	os.mkdirAll(testBuild, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "concurrencpp.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("concurrencpp")!), 0o644)!
+
+	binary := filepath.join(testBuild, "consumer")
+	exec! "c++", consumer, "-std=c++20", "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
