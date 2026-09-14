@@ -1,0 +1,116 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <stdlib.h>
+
+#include <wslay/wslay.h>
+
+int main(void) {
+    wslay_event_context_ptr ctx;
+    const struct wslay_event_callbacks callbacks = { NULL };
+
+    if (wslay_event_context_client_init(&ctx, &callbacks, NULL)) {
+        wslay_event_context_free(ctx);
+    }
+
+    return EXIT_SUCCESS;
+}
+`
+
+id "tatsuhiro-t/wslay"
+
+fromVer "release-1.1.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return slices.contains(target.require["os"], "linux") || slices.contains(target.require["os"], "darwin")
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_DEFAULT_CMP0042", "NEW"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "WSLAY_SHARED", shared
+	c.defineBool "WSLAY_STATIC", !shared
+	if slices.contains(target.require["os"], "darwin") {
+		c.define "CMAKE_C_FLAGS", "-Wno-strict-prototypes"
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	library := "wslay"
+	if shared {
+		library = "wslay_shared"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "Wslay",
+		description = "Low-level WebSockets library",
+		version = "release-1.1.0",
+		URL = "http://wslay.sourceforge.net/",
+		libs = ["-L$${libdir}", "-l"+library],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "libwslay.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("libwslay")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	sourcePath := filepath.join(testDir, "consumer.c")
+	os.writeFile(sourcePath, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "libwslay.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("libwslay")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! sourcePath, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		libDir := filepath.join(installDir, "lib")
+		if slices.contains(target.require["os"], "linux") {
+			os.setenv("LD_LIBRARY_PATH", libDir)!
+		} else if slices.contains(target.require["os"], "darwin") {
+			os.setenv("DYLD_LIBRARY_PATH", libDir)!
+		}
+	}
+	exec! binary
+}
