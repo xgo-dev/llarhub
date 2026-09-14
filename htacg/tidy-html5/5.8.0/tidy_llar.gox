@@ -1,0 +1,129 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+id "htacg/tidy-html5"
+
+fromVer "5.8.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+	"support_localizations": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" && name != "support_localizations" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	supportLocalizations := target.options["support_localizations"][0] == "ON"
+	osName := target.require["os"][0]
+
+	cmakeLists := filepath.join(ctx.SourceDir, "CMakeLists.txt")
+	cmakeSource := string(os.readFile(cmakeLists)!)
+	if cmakeSource.contains("PROJECT_BINARY_DIR") {
+		patch := ctx.Proj.readFile("5.8.0/0001-robust-install-pdb.patch")!
+		patchPath := filepath.join(ctx.SourceDir, "_llar_robust-install-pdb.patch")
+		os.writeFile(patchPath, patch, 0o644)!
+		patch! "-p1", "--batch", "--forward", "-i", patchPath
+	}
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "BUILD_TAB2SPACE", false
+	c.defineBool "BUILD_SAMPLE_CODE", false
+	c.defineBool "TIDY_COMPAT_HEADERS", false
+	c.defineBool "SUPPORT_CONSOLE_APP", false
+	c.defineBool "SUPPORT_LOCALIZATIONS", supportLocalizations
+	c.defineBool "ENABLE_DEBUG_LOG", false
+	c.defineBool "ENABLE_ALLOC_DEBUG", false
+	c.defineBool "ENABLE_MEMORY_DEBUG", false
+	c.defineBool "BUILD_SHARED_LIB", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.configure
+	c.build
+	c.install
+
+	if shared {
+		for path in filepath.glob(filepath.join(installDir, "lib", "*.a"))! {
+			os.remove(path)!
+		}
+		if osName == "windows" {
+			for path in filepath.glob(filepath.join(installDir, "lib", "*tidy_static*"))! {
+				os.remove(path)!
+			}
+		}
+	}
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(
+		filepath.join(licenseDir, "LICENSE.md"),
+		os.readFile(filepath.join(ctx.SourceDir, "README", "LICENSE.md"))!,
+		0o644,
+	)!
+
+	library := "tidy"
+	cflags := ["-I$${includedir}"]
+	if osName == "windows" && !shared {
+		library = "tidy_static"
+		cflags <- "-DTIDY_STATIC"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "tidy",
+		description = "tidy - HTML syntax checker",
+		version = "5.8.0",
+		URL = "http://www.html-tidy.org",
+		libs = ["-L$${libdir}", "-l"+library],
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "tidy.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("tidy")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := os.mkdirTemp("", "tidy-html5-consumer-*")!
+	defer os.removeAll(testDir)
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, ctx.Proj.readFile("5.8.0/consumer.c")!, 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "tidy.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("tidy")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		if target.require["os"][0] == "windows" {
+			path := os.getenv("PATH")
+			os.setenv("PATH", filepath.join(installDir, "bin")+";"+path)!
+		}
+	}
+	exec! binary
+}
