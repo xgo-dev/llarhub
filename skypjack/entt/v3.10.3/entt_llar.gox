@@ -1,0 +1,107 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <entt/entt.hpp>
+#include <cstdint>
+
+struct position
+{
+    float x;
+    float y;
+};
+
+struct velocity
+{
+    float dx;
+    float dy;
+};
+
+void update(entt::registry &registry)
+{
+    auto view = registry.view<position, velocity>();
+
+    for (auto entity : view)
+    {
+        auto &vel = view.get<velocity>(entity);
+
+        vel.dx = 0.;
+        vel.dy = 0.;
+    }
+}
+
+void update(std::uint64_t dt, entt::registry &registry)
+{
+    registry.view<position, velocity>().each([dt](auto &pos, auto &vel) {
+        pos.x += vel.dx * dt;
+        pos.y += vel.dy * dt;
+    });
+}
+
+int main()
+{
+    entt::registry registry;
+    std::uint64_t dt = 16;
+
+    for (auto i = 0; i < 10; ++i)
+    {
+        auto entity = registry.create();
+        registry.emplace<position>(entity, i * 1.f, i * 1.f);
+        if (i % 2 == 0) { registry.emplace<velocity>(entity, i * .1f, i * .1f); }
+    }
+
+    update(dt, registry);
+    update(registry);
+    return 0;
+}
+`
+
+id "skypjack/entt"
+
+fromVer "v3.10.3"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+	cp! "-R", filepath.join(ctx.SourceDir, "src", "entt"), includeDir
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	cp! filepath.join(ctx.SourceDir, "LICENSE"), licenseDir
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "EnTT",
+		description = "Gaming meets modern C++",
+		version = "3.10.3",
+		URL = "https://github.com/skypjack/entt",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "entt.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("entt")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "entt.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("entt")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
