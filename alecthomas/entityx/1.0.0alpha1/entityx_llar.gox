@@ -1,0 +1,108 @@
+import (
+	"os"
+	"path/filepath"
+	"slices"
+)
+
+const consumerSource = `#include <entityx/entityx.h>
+
+int main() {
+    entityx::EventManager events;
+    entityx::EntityManager entities(events);
+    entityx::Entity entity = entities.create();
+    entity.destroy();
+    return 0;
+}
+`
+
+id "alecthomas/entityx"
+
+fromVer "1.0.0alpha1"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.require {
+		if name != "os" && name != "arch" || values.len != 1 {
+			return false
+		}
+	}
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" || values.len != 1 {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	if !slices.contains(target.require["os"], "linux") && !slices.contains(target.require["os"], "darwin") {
+		return false
+	}
+	return slices.contains(target.require["arch"], "amd64") || slices.contains(target.require["arch"], "arm64")
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "ENTITYX_BUILD_SHARED", shared
+	c.defineBool "ENTITYX_BUILD_TESTING", false
+	c.defineBool "ENTITYX_RUN_BENCHMARKS", false
+	c.defineBool "CMAKE_MACOSX_RPATH", true
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYING"), os.readFile(filepath.join(ctx.SourceDir, "COPYING"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "entityx",
+		description = "EntityX is an EC system that uses C++11 features to provide type-safe component management, event delivery, etc.",
+		version = "1.0.0alpha1",
+		libs = ["-L$${libdir}", "-lentityx"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "entityx.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("entityx")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "entityx.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("entityx")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
