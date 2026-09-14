@@ -1,0 +1,160 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include "lzfse.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+int main(void) {
+	const char *text = "The quick brown fox jumps over the lazy dog. LZFSE roundtrip.";
+	const uint8_t *src = (const uint8_t *)text;
+	size_t srcSize = strlen(text) + 1;
+	size_t encodeScratchSize = lzfse_encode_scratch_size();
+	size_t decodeScratchSize = lzfse_decode_scratch_size();
+	void *encodeScratch = 0;
+	void *decodeScratch = 0;
+	uint8_t encoded[512];
+	uint8_t decoded[512];
+	size_t encodedSize;
+	size_t decodedSize;
+
+	if (encodeScratchSize != 0) {
+		encodeScratch = malloc(encodeScratchSize);
+		if (encodeScratch == 0) {
+			return 1;
+		}
+	}
+	if (decodeScratchSize != 0) {
+		decodeScratch = malloc(decodeScratchSize);
+		if (decodeScratch == 0) {
+			free(encodeScratch);
+			return 1;
+		}
+	}
+
+	encodedSize = lzfse_encode_buffer(encoded, sizeof(encoded), src, srcSize, encodeScratch);
+	if (encodedSize == 0) {
+		free(encodeScratch);
+		free(decodeScratch);
+		return 2;
+	}
+
+	decodedSize = lzfse_decode_buffer(decoded, sizeof(decoded), encoded, encodedSize, decodeScratch);
+	if (decodedSize != srcSize || memcmp(decoded, src, srcSize) != 0) {
+		free(encodeScratch);
+		free(decodeScratch);
+		return 3;
+	}
+
+	encodedSize = lzfse_encode_buffer(encoded, sizeof(encoded), src, srcSize, 0);
+	if (encodedSize == 0) {
+		free(encodeScratch);
+		free(decodeScratch);
+		return 4;
+	}
+	decodedSize = lzfse_decode_buffer(decoded, sizeof(decoded), encoded, encodedSize, 0);
+	if (decodedSize != srcSize || memcmp(decoded, src, srcSize) != 0) {
+		free(encodeScratch);
+		free(decodeScratch);
+		return 5;
+	}
+
+	free(encodeScratch);
+	free(decodeScratch);
+	return 0;
+}
+`
+
+id "lzfse/lzfse"
+
+fromVer "lzfse-1.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	cmakePatch := ctx.Proj.readFile("lzfse-1.0/cmake.patch")!
+	cmakePatchPath := filepath.join(ctx.SourceDir, "_llar_cmake.patch")
+	os.writeFile(cmakePatchPath, cmakePatch, 0o644)!
+	patch! "-p1", "--batch", "--forward", "-i", cmakePatchPath
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "LZFSE_BUNDLE_MODE", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	cflags := ["-I$${includedir}"]
+	if shared && target.require["os"][0] == "windows" {
+		cflags <- "-DLZFSE_DLL"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "lzfse",
+		description = "Lempel-Ziv style data compression algorithm using Finite State Entropy coding.",
+		version = "lzfse-1.0",
+		libs = ["-L$${libdir}", "-llzfse"],
+		cflags = cflags,
+	)!
+	out := os.create(filepath.join(pcDir, "lzfse.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("lzfse")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "lzfse.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("lzfse")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
