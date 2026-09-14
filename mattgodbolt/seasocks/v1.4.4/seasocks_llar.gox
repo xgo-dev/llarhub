@@ -1,0 +1,136 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <seasocks/Connection.h>
+#include <seasocks/PageHandler.h>
+#include <seasocks/PrintfLogger.h>
+#include <seasocks/ResponseBuilder.h>
+#include <seasocks/Server.h>
+#include <seasocks/internal/Config.h>
+#include <seasocks/util/CrackedUri.h>
+#include <seasocks/util/Json.h>
+
+#include <chrono>
+#include <memory>
+#include <string>
+#include <thread>
+
+namespace {
+
+class HealthHandler final : public seasocks::PageHandler {
+public:
+    std::shared_ptr<seasocks::Response> handle(const seasocks::Request&) override {
+        seasocks::ResponseBuilder response;
+        response.asJson() << seasocks::makeMap("status", "ok", "service", "seasocks");
+        return response.build();
+    }
+};
+
+} // namespace
+
+int main() {
+    seasocks::CrackedUri uri("/health?check=1");
+    if (!uri.hasParam("check") || uri.queryParam("check") != "1") {
+        return 1;
+    }
+    if (seasocks::makeArray("seasocks", 146).empty()) {
+        return 1;
+    }
+
+    auto logger = std::make_shared<seasocks::PrintfLogger>();
+    seasocks::Server server(logger);
+    server.addPageHandler(std::make_shared<HealthHandler>());
+    server.setPerMessageDeflateEnabled(seasocks::Config::deflateEnabled);
+    if (!server.startListening(0)) {
+        return 1;
+    }
+
+    bool loopExitedNormally = false;
+    std::thread loop([&] { loopExitedNormally = server.loop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    server.terminate();
+    loop.join();
+    return loopExitedNormally ? 0 : 1;
+}
+`
+
+id "mattgodbolt/seasocks"
+
+fromVer "v1.4.4"
+
+filter => {
+	// Upstream rejects APPLE and implements its event loop with Linux epoll.
+	// llarhub CI currently reports this unsupported Darwin matrix as a failure
+	// instead of skipping it, because it invokes every changed module there.
+	return target.require["os"][0] == "linux"
+}
+
+onRequire (proj, deps) => {
+	deps.require "madler/zlib", "v1.3.1"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.buildType "Release"
+	// v1.4.4 and v1.4.5 declare CMake 3.3 compatibility, which CMake 4 rejects.
+	// The 3.5 policy floor is accepted by the complete v1.4.4--v1.4.6 range.
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "SEASOCKS_SHARED", false
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", true
+	c.defineBool "DEFLATE_SUPPORT", true
+	c.defineBool "UNITTESTS", false
+	c.defineBool "SEASOCKS_EXAMPLE_APP", false
+
+	for dep in ctx.Proj.Deps {
+		c.use ctx.outputDir(dep)
+	}
+
+	c.configure
+	c.build
+	c.install
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "seasocks",
+		description = "A tiny embeddable C++ HTTP and WebSocket server",
+		version = "1.4.4",
+		requires = ["zlib"],
+		libs = ["-L$${libdir}", "-lseasocks", "-lpthread", "-lm"],
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "seasocks.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("seasocks")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	for dep in ctx.Proj.Deps {
+		pkgconfig.use ctx.outputDir(dep)
+	}
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "seasocks.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("seasocks")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++17", consumer, "-o", binary, "@"+flagsFile
+
+	exec! binary
+}
