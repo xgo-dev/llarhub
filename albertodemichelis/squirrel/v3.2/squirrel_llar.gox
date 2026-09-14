@@ -1,0 +1,154 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <stdarg.h>
+#include <stdio.h>
+
+#include <squirrel.h>
+#include <sqstdio.h>
+#include <sqstdaux.h>
+
+#ifdef SQUNICODE
+#define scvprintf vfwprintf
+#else
+#define scvprintf vfprintf
+#endif
+
+void printfunc(HSQUIRRELVM v,const SQChar *s,...)
+{
+    va_list vl;
+    va_start(vl, s);
+    scvprintf(stdout, s, vl);
+    va_end(vl);
+}
+
+void errorfunc(HSQUIRRELVM v,const SQChar *s,...)
+{
+    va_list vl;
+    va_start(vl, s);
+    scvprintf(stderr, s, vl);
+    va_end(vl);
+}
+
+int main()
+{
+    HSQUIRRELVM v;
+    v = sq_open(1024);
+
+    sqstd_seterrorhandlers(v);
+
+    sq_setprintfunc(v, printfunc, errorfunc);
+
+    sq_pushroottable(v);
+
+    sqstd_register_iolib(v);
+
+    sq_pop(v, 1);
+    sq_close(v);
+
+    return 0;
+}
+`
+
+id "albertodemichelis/squirrel"
+
+fromVer "v3.2"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+
+	patch := ctx.Proj.readFile("v3.2/3.2-fix-cmake-static-build.patch")!
+	patchPath := filepath.join(ctx.SourceDir, "_llar_squirrel-static-build.patch")
+	os.writeFile(patchPath, patch, 0o644)!
+	patch! "-p1", "--batch", "--forward", "-i", patchPath
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.define "CMAKE_POLICY_VERSION_MINIMUM", "3.5"
+	c.defineBool "DISABLE_DYNAMIC", !shared
+	c.defineBool "DISABLE_STATIC", shared
+	if !shared {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "COPYRIGHT"), os.readFile(filepath.join(ctx.SourceDir, "COPYRIGHT"))!, 0o644)!
+
+	libs := ["-L$${libdir}"]
+	if shared {
+		libs <- "-lsqstdlib"
+		libs <- "-lsquirrel"
+	} else {
+		libs <- "-lsqstdlib_static"
+		libs <- "-lsquirrel_static"
+	}
+	osName := target.require["os"][0]
+	if osName == "linux" || osName == "freebsd" {
+		libs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "squirrel",
+		description = "Squirrel scripting language",
+		version = "v3.2",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "squirrel.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("squirrel")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "squirrel.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("squirrel")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
