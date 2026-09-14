@@ -1,0 +1,225 @@
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+const consumerSource = `#if QR_USE_OLD_INCLUDE
+#include "qrcodegen/QrCode.hpp"
+#else
+#include "qrcodegen/qrcodegen.hpp"
+#endif
+
+#include <iostream>
+#include <limits>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+
+namespace {
+    std::string toSvgString(const qrcodegen::QrCode &qr, int border) {
+        if (border < 0)
+            throw std::domain_error("Border must be non-negative");
+        if (border > std::numeric_limits<int>::max() / 2 || border * 2 > std::numeric_limits<int>::max() - qr.getSize())
+            throw std::overflow_error("Border too large");
+
+        std::ostringstream sb;
+        sb << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+        sb << "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n";
+        sb << "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" viewBox=\"0 0 ";
+        sb << (qr.getSize() + border * 2) << " " << (qr.getSize() + border * 2) << "\" stroke=\"none\">\n";
+        sb << "\t<rect width=\"100%\" height=\"100%\" fill=\"#FFFFFF\"/>\n";
+        sb << "\t<path d=\"";
+        for (int y = 0; y < qr.getSize(); y++) {
+            for (int x = 0; x < qr.getSize(); x++) {
+                if (qr.getModule(x, y)) {
+                    if (x != 0 || y != 0)
+                        sb << " ";
+                    sb << "M" << (x + border) << "," << (y + border) << "h1v1h-1z";
+                }
+            }
+        }
+        sb << "\" fill=\"#000000\"/>\n";
+        sb << "</svg>\n";
+        return sb.str();
+    }
+}
+
+int main() {
+    std::cout << toSvgString(qrcodegen::QrCode::encodeText("test", qrcodegen::QrCode::Ecc::MEDIUM), 0);
+    return 0;
+}
+`
+
+id "nayuki/QR-Code-generator"
+
+fromVer "v1.4.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	osName := target.require["os"][0]
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	inputDir := os.mkdirTemp("", "qrcode-generator-build-input-*")!
+	defer os.removeAll(inputDir)
+	for dirName in ["c", "cpp"] {
+		sourceDir := filepath.join(ctx.SourceDir, dirName)
+		destinationDir := filepath.join(inputDir, dirName)
+		os.mkdirAll(destinationDir, 0o755)!
+		for path in filepath.glob(filepath.join(sourceDir, "*"))! {
+			os.writeFile(
+				filepath.join(destinationDir, filepath.base(path)),
+				os.readFile(path)!,
+				0o644,
+			)!
+		}
+	}
+
+	cmakeLists := ctx.Proj.readFile("CMakeLists.txt")!
+	os.writeFile(filepath.join(inputDir, "CMakeLists.txt"), cmakeLists, 0o644)!
+
+	cppHeader := filepath.join(inputDir, "cpp", "QrCode.hpp")
+	cppLibrary := "qrcodegen"
+	newHeader := filepath.join(inputDir, "cpp", "qrcodegen.hpp")
+	if _, err := os.stat(newHeader); err == nil {
+		cppHeader = newHeader
+		cppLibrary = "qrcodegencpp"
+	} else if !os.isNotExist(err) {
+		panic err
+	}
+
+	if cppLibrary == "qrcodegen" {
+		header := string(os.readFile(cppHeader)!)
+		if strings.index(header, "#include <stdexcept>") < 0 {
+			header = strings.replace(header, "#include <vector>\n", "#include <vector>\n#include <stdexcept>\n", 1)
+			os.writeFile(cppHeader, []byte(header), 0o644)!
+		}
+	}
+
+	c := cmake.new(inputDir, filepath.join(inputDir, "_build"), installDir)
+	c.define "CMAKE_INSTALL_LIBDIR", "lib"
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	if osName == "windows" && shared {
+		c.defineBool "CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS", true
+	}
+	if osName != "windows" {
+		c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	}
+	c.configure
+	c.build
+	c.install
+
+	licenseHeader := string(os.readFile(cppHeader)!)
+	licenseEnd := strings.index(licenseHeader, "*/")
+	if licenseEnd < 0 {
+		panic "C++ header has no license comment"
+	}
+	license := strings.trimSpace(licenseHeader[:licenseEnd])
+	license = strings.replace(license, "/*", "", 1)
+	license = strings.replace(license, "\n * ", "\n", -1)
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), []byte(license), 0o644)!
+
+	cppLibs := ["-L$${libdir}", "-l"+cppLibrary]
+	cLibs := ["-L$${libdir}", "-lqrcodegenc"]
+	if osName == "linux" || osName == "freebsd" {
+		cppLibs <- "-lm"
+		cLibs <- "-lm"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	cppPC := pkgconfig.new(
+		name = "qrcodegencpp",
+		description = "High-quality QR Code generator library (C++)",
+		version = "v1.4.0",
+		libs = cppLibs,
+		cflags = ["-I$${includedir}"],
+	)!
+	cppOut := os.create(filepath.join(pcDir, "qrcodegencpp.pc"))!
+	cppPC.writeTo(cppOut)!
+	cppOut.close()!
+
+	cPC := pkgconfig.new(
+		name = "qrcodegenc",
+		description = "High-quality QR Code generator library (C)",
+		version = "v1.4.0",
+		libs = cLibs,
+		cflags = ["-I$${includedir}"],
+	)!
+	cOut := os.create(filepath.join(pcDir, "qrcodegenc.pc"))!
+	cPC.writeTo(cOut)!
+	cOut.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("qrcodegencpp")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	osName := target.require["os"][0]
+	shared := target.options["shared"][0] == "ON"
+	testDir := os.mkdirTemp("", "qrcode-generator-consumer-*")!
+	defer os.removeAll(testDir)
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "qrcodegencpp.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("qrcodegencpp")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	args := ["-std=c++11", consumer, "-o", binary, "@"+flagsFile]
+	newHeader := filepath.join(installDir, "include", "qrcodegen", "qrcodegen.hpp")
+	if _, err := os.stat(newHeader); os.isNotExist(err) {
+		args <- "-DQR_USE_OLD_INCLUDE"
+	} else if err != nil {
+		panic err
+	}
+	exec! "c++", args...
+
+	if shared {
+		libDir := filepath.join(installDir, "lib")
+		if osName == "windows" {
+			runtimeDir := filepath.join(installDir, "bin")
+			pathValue := runtimeDir
+			if current := os.getenv("PATH"); current != "" {
+				pathValue += ";" + current
+			}
+			os.setenv("PATH", pathValue)!
+		} else {
+			ldPath := libDir
+			if current := os.getenv("LD_LIBRARY_PATH"); current != "" {
+				ldPath += ":" + current
+			}
+			os.setenv("LD_LIBRARY_PATH", ldPath)!
+			dyldPath := libDir
+			if current := os.getenv("DYLD_LIBRARY_PATH"); current != "" {
+				dyldPath += ":" + current
+			}
+			os.setenv("DYLD_LIBRARY_PATH", dyldPath)!
+		}
+	}
+	exec! binary
+}
