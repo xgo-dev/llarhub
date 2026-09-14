@@ -1,0 +1,78 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <string.h>
+#include "greatest.h"
+
+TEST assertions_test(void) {
+    int value = 3;
+    char expected[] = "greatest";
+    char actual[] = "greatest";
+    ASSERT_EQ(3, value);
+    ASSERT_STR_EQ(expected, actual);
+    PASS();
+}
+
+SUITE(greatest_suite) {
+    RUN_TEST(assertions_test);
+}
+
+GREATEST_MAIN_DEFS();
+
+int main(int argc, char **argv) {
+    GREATEST_MAIN_BEGIN();
+    RUN_SUITE(greatest_suite);
+    GREATEST_MAIN_END();
+}
+`
+
+id "silentbicycle/greatest"
+
+fromVer "v1.1.0"
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+
+	includeDir := filepath.join(installDir, "include")
+	os.mkdirAll(includeDir, 0o755)!
+	os.writeFile(filepath.join(includeDir, "greatest.h"), os.readFile(filepath.join(ctx.SourceDir, "greatest.h"))!, 0o644)!
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE"))!, 0o644)!
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+
+	pc := pkgconfig.new(
+		name = "greatest",
+		description = "A C testing library in 1 file. No dependencies, no dynamic allocation.",
+		version = "v1.1.0",
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "greatest.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("greatest")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := os.mkdirTemp("", "greatest-consumer-*")!
+	defer os.removeAll(testDir)
+
+	consumer := filepath.join(testDir, "consumer.c")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "greatest.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("greatest")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	cc! "-std=c89", consumer, "-o", binary, "@"+flagsFile
+	exec! binary
+}
