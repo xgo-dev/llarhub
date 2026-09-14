@@ -1,0 +1,15 @@
+import "strings"
+
+// Every visible tag is a semantic version after adding the missing v prefix.
+// GNU ordering places v1.0.0 before v1.0.0-pre1, so compare the complete tag
+// set as semantic versions instead.
+func normalize(version string) string {
+	if strings.hasPrefix(version, "v") {
+		return version
+	}
+	return "v" + version
+}
+
+compareVer (a, b) => {
+	return semver.Compare(normalize(a.Version), normalize(b.Version))
+}

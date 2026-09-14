@@ -1,0 +1,123 @@
+import (
+	"os"
+	"path/filepath"
+)
+
+const consumerSource = `#include <rpc/server.h>
+
+double divide(double a, double b) { return a / b; }
+
+struct subtractor {
+    double operator()(double a, double b) { return a - b; }
+};
+
+struct multiplier {
+    double multiply(double a, double b) { return a * b; }
+};
+
+int main() {
+    rpc::server srv(8080);
+
+    subtractor s;
+    multiplier m;
+
+    srv.bind("add", [](double a, double b) { return a + b; });
+    srv.bind("sub", s);
+    srv.bind("div", &divide);
+    srv.bind("mul", [&m](double a, double b) { return m.multiply(a, b); });
+    srv.bind("get", []()
+    {
+        return std::vector<uint32_t>({1,2,3,4,5,6,7});
+    });
+
+    return 0;
+}
+`
+
+id "rpclib/rpclib"
+
+fromVer "v2.3.0"
+
+defaults {
+	"shared": "OFF",
+	"fPIC": "ON",
+}
+
+filter => {
+	for name, values in target.options {
+		if name != "shared" && name != "fPIC" {
+			return false
+		}
+		for value in values {
+			if value != "ON" && value != "OFF" {
+				return false
+			}
+		}
+	}
+
+	osName := target.require["os"][0]
+	return osName == "linux" || osName == "darwin"
+}
+
+onBuild ctx => {
+	installDir := ctx.outputDir
+	shared := target.options["shared"][0] == "ON"
+	fPIC := target.options["fPIC"][0] == "ON"
+	osName := target.require["os"][0]
+
+	c := cmake.new(ctx.SourceDir, filepath.join(ctx.SourceDir, "_build"), installDir)
+	c.defineBool "BUILD_SHARED_LIBS", shared
+	c.defineBool "CMAKE_POSITION_INDEPENDENT_CODE", fPIC
+	c.defineBool "RPCLIB_BUILD_TESTS", false
+	c.defineBool "RPCLIB_BUILD_EXAMPLES", false
+	c.configure
+	c.build
+	c.install
+
+	licenseDir := filepath.join(installDir, "licenses")
+	os.mkdirAll(licenseDir, 0o755)!
+	os.writeFile(filepath.join(licenseDir, "LICENSE.md"), os.readFile(filepath.join(ctx.SourceDir, "LICENSE.md"))!, 0o644)!
+
+	libs := ["-L$${libdir}", "-lrpc"]
+	if osName == "linux" {
+		libs <- "-lm", "-lpthread"
+	}
+
+	pcDir := filepath.join(installDir, "lib", "pkgconfig")
+	os.mkdirAll(pcDir, 0o755)!
+	pc := pkgconfig.new(
+		name = "rpclib",
+		description = "rpclib is a msgpack-rpc library written using modern C++",
+		version = "2.3.0",
+		libs = libs,
+		cflags = ["-I$${includedir}"],
+	)!
+	out := os.create(filepath.join(pcDir, "rpclib.pc"))!
+	pc.writeTo(out)!
+	out.close()!
+
+	pkgconfig.use installDir
+	ctx.setMetadata pkgconfig.lookup("rpclib")!
+}
+
+onTest ctx => {
+	installDir := ctx.outputDir
+	testDir := filepath.join(ctx.SourceDir, "_llar_consumer")
+	os.mkdirAll(testDir, 0o755)!
+
+	consumer := filepath.join(testDir, "consumer.cpp")
+	os.writeFile(consumer, []byte(consumerSource), 0o644)!
+
+	pkgconfig.use installDir
+	flagsFile := filepath.join(testDir, "rpclib.flags")
+	os.writeFile(flagsFile, []byte(pkgconfig.lookup("rpclib")!), 0o644)!
+
+	binary := filepath.join(testDir, "consumer")
+	exec! "c++", "-std=c++11", consumer, "-o", binary, "@"+flagsFile
+
+	if target.options["shared"][0] == "ON" {
+		os.setenv("LD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+		os.setenv("DYLD_LIBRARY_PATH", filepath.join(installDir, "lib"))!
+	}
+	exec! binary
+}
